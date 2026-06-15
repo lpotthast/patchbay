@@ -1,7 +1,7 @@
 use std::{collections::HashMap, str::FromStr, time::Duration as StdDuration};
 
-use anyhow::{Context, Result, bail};
 use crudkit_core::condition::Condition;
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder, QuerySelect,
@@ -156,7 +156,7 @@ pub async fn delete_trigger(store: &Store, project_name: &str, trigger_id: i64) 
         .one(store.db().as_ref())
         .await
         .context("failed to load automation trigger")?
-        .ok_or_else(|| anyhow::anyhow!("trigger {trigger_id} does not exist in this project"))?;
+        .ok_or_else(|| report!("trigger {trigger_id} does not exist in this project"))?;
     AutomationTrigger::delete_by_id(trigger.id)
         .exec(store.db().as_ref())
         .await
@@ -177,7 +177,7 @@ pub async fn update_trigger(
         .one(store.db().as_ref())
         .await
         .context("failed to load automation trigger")?
-        .ok_or_else(|| anyhow::anyhow!("trigger {trigger_id} does not exist in this project"))?;
+        .ok_or_else(|| report!("trigger {trigger_id} does not exist in this project"))?;
     let previous_kind = AutomationActivation::from_str(&existing.activation)?;
     let schedule = normalize_schedule(update.schedule)?;
     let mode = default_mode_for_activation(update.activation);
@@ -357,7 +357,7 @@ pub async fn schedule_trigger_evaluation(
         .one(store.db().as_ref())
         .await
         .context("failed to load automation trigger")?
-        .ok_or_else(|| anyhow::anyhow!("trigger {trigger_id} does not exist in this project"))?;
+        .ok_or_else(|| report!("trigger {trigger_id} does not exist in this project"))?;
     let now = utc_now();
     let pending_evaluation_count = trigger.pending_evaluation_count.saturating_add(1);
     let mut active: AutomationTriggerActiveModel = trigger.into();
@@ -422,10 +422,10 @@ async fn consume_queued_evaluation(
     let mut active: AutomationTriggerActiveModel = trigger.into();
     active.pending_evaluation_count = Set(pending_evaluation_count);
     active.updated_at = Set(utc_now());
-    active
+    Ok(active
         .update(store.db().as_ref())
         .await
-        .context("failed to consume queued automation evaluation")
+        .context("failed to consume queued automation evaluation")?)
 }
 
 async fn run_next_work_item_automation_for_project(
@@ -840,10 +840,10 @@ async fn new_item_created_events(
     if let Some(last_event_id) = last_event_id {
         query = query.filter(work_item_event::Column::Id.gt(last_event_id));
     }
-    query
+    Ok(query
         .all(store.db().as_ref())
         .await
-        .context("failed to load item-created events")
+        .context("failed to load item-created events")?)
 }
 
 pub(crate) async fn latest_item_created_event_id(
@@ -866,7 +866,7 @@ async fn project_name_for_id(store: &Store, project_id: i64) -> Result<String> {
         .one(store.db().as_ref())
         .await
         .context("failed to load trigger project")?
-        .ok_or_else(|| anyhow::anyhow!("project {project_id} does not exist"))?;
+        .ok_or_else(|| report!("project {project_id} does not exist"))?;
     Ok(project.name)
 }
 
@@ -940,7 +940,7 @@ pub(crate) fn default_work_item_selector() -> Condition {
 
 pub(crate) fn default_work_item_selector_storage() -> Result<String> {
     selector_to_storage(Some(&default_work_item_selector()))?
-        .ok_or_else(|| anyhow::anyhow!("default work-item automation selector cannot be empty"))
+        .ok_or_else(|| report!("default work-item automation selector cannot be empty"))
 }
 
 pub(crate) async fn ensure_default_project_automations_in_conn<C>(
@@ -1014,9 +1014,9 @@ fn selector_for_activation(
 
 pub(crate) fn selector_to_storage(selector: Option<&Condition>) -> Result<Option<String>> {
     selector
-        .map(|selector| {
+        .map(|selector| -> Result<String> {
             items::validate_label_condition(selector)?;
-            serde_json::to_string(selector).context("failed to encode work item selector")
+            Ok(serde_json::to_string(selector).context("failed to encode work item selector")?)
         })
         .transpose()
 }
@@ -1029,7 +1029,7 @@ pub(crate) fn selector_from_storage(selector: Option<&str>) -> Result<Option<Con
         })
         .map(|selector| {
             let condition = serde_json::from_str::<Condition>(selector)
-                .with_context(|| format!("invalid work item selector JSON: {selector}"))?;
+                .context_with(|| format!("invalid work item selector JSON: {selector}"))?;
             items::validate_label_condition(&condition)?;
             Ok(condition)
         })
@@ -1048,9 +1048,9 @@ fn trigger_is_due(next_evaluation_at: Option<&str>) -> bool {
 
 pub(crate) fn next_evaluation_at(schedule: &str) -> Result<String> {
     let interval = parse_schedule(schedule)?;
-    (OffsetDateTime::now_utc() + interval)
+    Ok((OffsetDateTime::now_utc() + interval)
         .format(&Rfc3339)
-        .context("failed to format next trigger run time")
+        .context("failed to format next trigger run time")?)
 }
 
 fn parse_schedule(schedule: &str) -> Result<Duration> {
@@ -1073,7 +1073,7 @@ fn parse_schedule(schedule: &str) -> Result<Duration> {
     }
     let amount: i64 = number
         .parse()
-        .with_context(|| format!("invalid schedule amount '{number}'"))?;
+        .context_with(|| format!("invalid schedule amount '{number}'"))?;
     if amount < 1 {
         bail!("schedule interval must be at least 1");
     }

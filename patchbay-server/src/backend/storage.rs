@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result};
+use rootcause::{Result, prelude::*};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -21,7 +21,7 @@ impl Store {
     pub async fn open(path: PathBuf) -> Result<Self> {
         let path = absolute_path(path)?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
+            fs::create_dir_all(parent).context_with(|| {
                 format!("failed to create database directory {}", parent.display())
             })?;
         }
@@ -29,7 +29,7 @@ impl Store {
         let url = sqlite_url(&path);
         let db = Database::connect(&url)
             .await
-            .with_context(|| format!("failed to open database {}", path.display()))?;
+            .context_with(|| format!("failed to open database {}", path.display()))?;
         db.execute(Statement::from_string(
             DbBackend::Sqlite,
             "PRAGMA foreign_keys = ON".to_owned(),

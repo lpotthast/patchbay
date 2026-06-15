@@ -6,8 +6,8 @@ mod shared;
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use rootcause::Result;
 
 use crate::{
     backend::{

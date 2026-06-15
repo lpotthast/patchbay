@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{Context, Result, bail};
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
 };
@@ -81,7 +81,7 @@ pub async fn resolve_tool_path(store: &Store, tool: AgentToolName) -> Result<Pat
 
     view.effective_path
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("agent tool '{tool}' is not configured or discoverable"))
+        .ok_or_else(|| report!("agent tool '{tool}' is not configured or discoverable"))
 }
 
 async fn discover_tool(store: &Store, tool: AgentToolName) -> Result<AgentToolView> {
@@ -118,11 +118,11 @@ async fn discover_tool(store: &Store, tool: AgentToolName) -> Result<AgentToolVi
 }
 
 async fn find_tool_model(store: &Store, tool: AgentToolName) -> Result<Option<AgentToolModel>> {
-    AgentTool::find()
+    Ok(AgentTool::find()
         .filter(agent_tool::Column::ToolName.eq(tool.as_storage()))
         .one(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to load agent tool '{tool}'"))
+        .context_with(|| format!("failed to load agent tool '{tool}'"))?)
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {

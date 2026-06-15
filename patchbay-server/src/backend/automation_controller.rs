@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{Context, Result};
+use rootcause::{Result, prelude::*};
 use tokio::{
     sync::{Mutex, watch},
     task::JoinHandle,

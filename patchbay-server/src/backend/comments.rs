@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
     TransactionTrait,

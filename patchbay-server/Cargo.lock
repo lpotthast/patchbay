@@ -485,7 +485,7 @@ dependencies = [
  "async-trait",
  "chrome-for-testing-manager",
  "futures-util",
- "rootcause",
+ "rootcause 0.12.1",
  "thirtyfour",
  "thiserror 2.0.18",
  "tokio",
@@ -580,7 +580,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cabe5069b1ad28e931e7d583358f1ab5288d783ed43d40182195622a665ce745"
 dependencies = [
  "reqwest",
- "rootcause",
+ "rootcause 0.12.1",
  "serde",
  "thiserror 2.0.18",
  "time",
@@ -597,7 +597,7 @@ dependencies = [
  "directories",
  "futures",
  "reqwest",
- "rootcause",
+ "rootcause 0.12.1",
  "thirtyfour",
  "thiserror 2.0.18",
  "tokio",
@@ -2897,7 +2897,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f79ec50e1e2910852177e347ac7317284a94f13dd0d1b97fbb43d9c36e3bbe1"
 dependencies = [
- "rootcause",
+ "rootcause 0.12.1",
  "thiserror 2.0.18",
  "tokio",
  "tokio-process-tools",
@@ -3891,7 +3891,6 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 name = "patchbay-server"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "assertr",
  "async-stream",
  "async-trait",
@@ -3921,6 +3920,7 @@ dependencies = [
  "leptos_router 0.8.11",
  "paste",
  "patchbay-types",
+ "rootcause 0.13.0",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -4645,7 +4645,20 @@ checksum = "4fc4bd36159c7ce180fe2de1e5371ef107a2885f0048430f631e78202e2255d4"
 dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
- "rootcause-internals",
+ "rootcause-internals 0.12.1",
+ "rustc-hash 2.1.2",
+ "triomphe",
+]
+
+[[package]]
+name = "rootcause"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b660d9968fae12f4e691f2b2be5d9a3a6de875300c682e8d2cb89a618dd60875"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "rootcause-internals 0.13.0",
  "rustc-hash 2.1.2",
  "triomphe",
 ]
@@ -4655,6 +4668,15 @@ name = "rootcause-internals"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d0df4f84d119d09b5c9c9e8db0fe9bfb5b47b04d0bb95b0763cf81bd9baa559"
+dependencies = [
+ "triomphe",
+]
+
+[[package]]
+name = "rootcause-internals"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0184f6fcff3b58b7c963aee6e3cc915c04331aa6eef974f79d7d44d21e246c24"
 dependencies = [
  "triomphe",
 ]

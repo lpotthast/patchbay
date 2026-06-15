@@ -1,6 +1,5 @@
 use std::{env, time::Duration};
 
-use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use patchbay_api_client::PatchbayClient;
 use patchbay_types::{
@@ -9,6 +8,7 @@ use patchbay_types::{
     ProgressWorkItemRequest, ReleaseWorkItemRequest, UpdateProjectMemoryRequest,
     UpdateWorkItemLabelRequest, UpdateWorkItemRequest, WorkItemView,
 };
+use rootcause::{Result, option_ext::OptionExt, prelude::*};
 use serde::Serialize;
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:4000";
@@ -436,21 +436,23 @@ impl ResolvedContext {
     }
 
     fn project(&self) -> Result<&str> {
-        self.project
+        Ok(self
+            .project
             .as_deref()
-            .context("missing Patchbay project; pass --project or set PATCHBAY_PROJECT")
+            .context("missing Patchbay project; pass --project or set PATCHBAY_PROJECT")?)
     }
 
     fn agent_id(&self) -> Result<&str> {
-        self.agent_id
+        Ok(self
+            .agent_id
             .as_deref()
-            .context("missing Patchbay agent id; pass --agent or set PATCHBAY_AGENT_ID")
+            .context("missing Patchbay agent id; pass --agent or set PATCHBAY_AGENT_ID")?)
     }
 
     fn item_id(&self, explicit: Option<i64>) -> Result<i64> {
-        explicit
+        Ok(explicit
             .or(self.claimed_item_id)
-            .context("missing item id; pass an item id or set PATCHBAY_CLAIMED_ITEM_ID")
+            .context("missing item id; pass an item id or set PATCHBAY_CLAIMED_ITEM_ID")?)
     }
 }
 
@@ -899,7 +901,7 @@ fn resolve_context(
     let claimed_item_id = match env_value("PATCHBAY_CLAIMED_ITEM_ID").ok() {
         Some(raw) if !raw.trim().is_empty() => Some(
             raw.parse::<i64>()
-                .with_context(|| format!("invalid PATCHBAY_CLAIMED_ITEM_ID '{raw}'"))?,
+                .context_with(|| format!("invalid PATCHBAY_CLAIMED_ITEM_ID '{raw}'"))?,
         ),
         _ => None,
     };

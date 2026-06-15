@@ -1,4 +1,3 @@
-use anyhow::{Result, bail};
 use axum::{
     Extension, Json,
     extract::{Path, Query},
@@ -11,6 +10,7 @@ use patchbay_types::{
     ProgressWorkItemRequest, ReleaseWorkItemRequest, UpdateProjectMemoryRequest,
     UpdateWorkItemLabelRequest, UpdateWorkItemRequest,
 };
+use rootcause::{Result, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{
@@ -318,7 +318,7 @@ async fn update_item_inner(
         );
     }
 
-    updated.ok_or_else(|| anyhow::anyhow!("item update requires at least one field"))
+    updated.ok_or_else(|| report!("item update requires at least one field"))
 }
 
 fn json_result<T>(result: Result<T>) -> Response

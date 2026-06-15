@@ -8,7 +8,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
 use codex_app_server_sdk::{
     ApprovalMode, ModelReasoningEffort as CodexReasoningEffort, ReviewModeItem, SandboxMode,
     ThreadEvent, ThreadItem, ThreadOptions, TurnOptions,
@@ -17,6 +16,7 @@ use crudkit_core::condition::Condition;
 use git2::{
     Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions, build::CheckoutBuilder,
 };
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect,
@@ -155,8 +155,12 @@ impl fmt::Display for AutomationCancelled {
 
 impl std::error::Error for AutomationCancelled {}
 
-fn is_automation_cancelled(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<AutomationCancelled>().is_some()
+fn is_automation_cancelled(err: &Report) -> bool {
+    err.iter_reports().any(|report| {
+        report
+            .downcast_current_context::<AutomationCancelled>()
+            .is_some()
+    })
 }
 
 fn cancellation_requested(cancellation: &Option<watch::Receiver<bool>>) -> bool {
@@ -535,7 +539,7 @@ async fn complete_started_automation_run(
 
     let log_dir = automation_log_dir();
     if let Err(err) = fs::create_dir_all(&log_dir)
-        .with_context(|| format!("failed to create automation log dir {}", log_dir.display()))
+        .context_with(|| format!("failed to create automation log dir {}", log_dir.display()))
     {
         return fail_run_after_claim(
             store,
@@ -577,7 +581,7 @@ async fn complete_started_automation_run(
         create_pr: settings.create_pr,
     });
     if let Err(err) = fs::write(&prompt_path, prompt)
-        .with_context(|| format!("failed to write prompt {}", prompt_path.display()))
+        .context_with(|| format!("failed to write prompt {}", prompt_path.display()))
     {
         return fail_run_after_claim(
             store,
@@ -648,7 +652,7 @@ async fn complete_started_automation_run(
     match output {
         Ok(output) => {
             run = update_run_process_id(store, run, output.process_id).await?;
-            write_run_output_log(&log_path, &output.output).with_context(|| {
+            write_run_output_log(&log_path, &output.output).context_with(|| {
                 format!("failed to write automation log {}", log_path.display())
             })?;
             let exit_code = Some(0);
@@ -723,7 +727,7 @@ async fn complete_started_automation_run(
                 message.clone(),
                 serde_json::json!({ "cancelled": cancelled }),
             )];
-            write_run_output_log(&log_path, &output).with_context(|| {
+            write_run_output_log(&log_path, &output).context_with(|| {
                 format!("failed to write automation log {}", log_path.display())
             })?;
             release_claim_if_needed(
@@ -968,7 +972,7 @@ pub async fn get_run(store: &Store, project_name: &str, run_id: i64) -> Result<A
         .one(store.db().as_ref())
         .await
         .context("failed to load agent run")?
-        .ok_or_else(|| anyhow::anyhow!("agent run {run_id} does not exist in this project"))?;
+        .ok_or_else(|| report!("agent run {run_id} does not exist in this project"))?;
     model_to_view(run)
 }
 
@@ -1007,7 +1011,7 @@ pub async fn cleanup_worktrees(
         .as_ref()
         .filter(|path| !path.trim().is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("project '{project_name}' has no path"))?;
+        .ok_or_else(|| report!("project '{project_name}' has no path"))?;
     let mut query = AgentRun::find()
         .filter(agent_run::Column::ProjectId.eq(project_id))
         .order_by_desc(agent_run::Column::CreatedAt)
@@ -1266,7 +1270,7 @@ fn prepare_workspace(
             let worktree_path = root.join(format!("{slug}-{run_id}"));
             let branch_name = format!("patchbay/{slug}-{run_id}");
             fs::create_dir_all(&root)
-                .with_context(|| format!("failed to create {}", root.display()))?;
+                .context_with(|| format!("failed to create {}", root.display()))?;
             create_git_worktree(project_path, &branch_name, &worktree_path)?;
             Ok(WorkspacePlan {
                 working_dir: worktree_path.clone(),
@@ -1478,7 +1482,7 @@ async fn run_agent_process_inner(
                 result.context("Codex app-server turn exceeded the automation timeout")?
             }
             _ = wait_for_any_cancellation(session_cancellation, external_cancellation) => {
-                Err(AutomationCancelled.into())
+                Err(report!(AutomationCancelled).into_dynamic())
             }
         }
     } else {
@@ -1522,7 +1526,7 @@ async fn run_codex_app_server_turn(
 ) -> Result<AgentProcessOutput> {
     let prompt = tokio::fs::read_to_string(&start.prompt_path)
         .await
-        .with_context(|| format!("failed to read prompt {}", start.prompt_path.display()))?;
+        .context_with(|| format!("failed to read prompt {}", start.prompt_path.display()))?;
     let working_dir = start.working_dir.to_string_lossy().into_owned();
     let mut output = Vec::new();
 
@@ -1669,7 +1673,7 @@ async fn cleanup_worktree_for_run(
     let branch_name = run
         .branch_name
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("run {} has a worktree but no branch name", run.id))?;
+        .ok_or_else(|| report!("run {} has a worktree but no branch name", run.id))?;
     prune_git_worktree(repo_path, &branch_name, Path::new(&worktree_path))?;
     update_run_cleanup(store, run, "cleaned", Some(utc_now())).await
 }
@@ -1694,12 +1698,12 @@ async fn update_run_cleanup(
 
 fn prune_git_worktree(repo_path: &Path, branch_name: &str, worktree_path: &Path) -> Result<()> {
     let repo = Repository::open(repo_path)
-        .with_context(|| format!("failed to open git repository '{}'", repo_path.display()))?;
+        .context_with(|| format!("failed to open git repository '{}'", repo_path.display()))?;
     match repo.find_worktree(&worktree_name(branch_name)) {
         Ok(worktree) => {
             let mut prune_options = WorktreePruneOptions::new();
             prune_options.valid(true).working_tree(true);
-            worktree.prune(Some(&mut prune_options)).with_context(|| {
+            worktree.prune(Some(&mut prune_options)).context_with(|| {
                 format!("failed to prune git worktree '{}'", worktree_path.display())
             })?;
         }
@@ -1707,7 +1711,7 @@ fn prune_git_worktree(repo_path: &Path, branch_name: &str, worktree_path: &Path)
             if !worktree_path.exists() {
                 return Ok(());
             }
-            fs::remove_dir_all(worktree_path).with_context(|| {
+            fs::remove_dir_all(worktree_path).context_with(|| {
                 format!(
                     "failed to remove stale worktree directory '{}' after git lookup failed: {err}",
                     worktree_path.display()
@@ -1730,48 +1734,48 @@ fn ensure_git_worktree_clean(path: &Path) -> Result<()> {
 
 fn git_worktree_is_clean(path: &Path) -> Result<bool> {
     let repo = Repository::open(path)
-        .with_context(|| format!("failed to open git repository '{}'", path.display()))?;
+        .context_with(|| format!("failed to open git repository '{}'", path.display()))?;
     let mut status_options = StatusOptions::new();
     status_options
         .include_untracked(true)
         .recurse_untracked_dirs(true);
     let statuses = repo
         .statuses(Some(&mut status_options))
-        .with_context(|| format!("failed to read git status for '{}'", path.display()))?;
+        .context_with(|| format!("failed to read git status for '{}'", path.display()))?;
     Ok(statuses.is_empty())
 }
 
 fn create_and_checkout_git_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
     let repo = Repository::open(repo_path)
-        .with_context(|| format!("failed to open git repository '{}'", repo_path.display()))?;
+        .context_with(|| format!("failed to open git repository '{}'", repo_path.display()))?;
     ensure_git_worktree_clean(repo_path)?;
     let head = repo.head().context("failed to read repository HEAD")?;
     let target = head
         .peel_to_commit()
         .context("repository HEAD does not point to a commit")?;
     repo.branch(branch_name, &target, false)
-        .with_context(|| format!("failed to create branch '{branch_name}'"))?;
+        .context_with(|| format!("failed to create branch '{branch_name}'"))?;
     repo.set_head(&format!("refs/heads/{branch_name}"))
-        .with_context(|| format!("failed to set HEAD to '{branch_name}'"))?;
+        .context_with(|| format!("failed to set HEAD to '{branch_name}'"))?;
     let mut checkout = CheckoutBuilder::new();
     checkout.safe();
     repo.checkout_head(Some(&mut checkout))
-        .with_context(|| format!("failed to check out branch '{branch_name}'"))?;
+        .context_with(|| format!("failed to check out branch '{branch_name}'"))?;
     Ok(())
 }
 
 fn create_git_worktree(repo_path: &Path, branch_name: &str, worktree_path: &Path) -> Result<()> {
     let repo = Repository::open(repo_path)
-        .with_context(|| format!("failed to open git repository '{}'", repo_path.display()))?;
+        .context_with(|| format!("failed to open git repository '{}'", repo_path.display()))?;
     let head = repo.head().context("failed to read repository HEAD")?;
     let target = head
         .peel_to_commit()
         .context("repository HEAD does not point to a commit")?;
     repo.branch(branch_name, &target, false)
-        .with_context(|| format!("failed to create branch '{branch_name}'"))?;
+        .context_with(|| format!("failed to create branch '{branch_name}'"))?;
     let branch_reference = repo
         .find_reference(&format!("refs/heads/{branch_name}"))
-        .with_context(|| format!("failed to read branch reference '{branch_name}'"))?;
+        .context_with(|| format!("failed to read branch reference '{branch_name}'"))?;
     let mut options = WorktreeAddOptions::new();
     options.reference(Some(&branch_reference));
     repo.worktree(
@@ -1779,7 +1783,7 @@ fn create_git_worktree(repo_path: &Path, branch_name: &str, worktree_path: &Path
         worktree_path,
         Some(&options),
     )
-    .with_context(|| format!("failed to create worktree '{}'", worktree_path.display()))?;
+    .context_with(|| format!("failed to create worktree '{}'", worktree_path.display()))?;
     Ok(())
 }
 
@@ -1878,7 +1882,7 @@ async fn read_optional_text(path: Option<&str>) -> Result<Option<String>> {
     let body = match tokio::fs::read_to_string(path).await {
         Ok(body) => body,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path)),
+        Err(err) => return Err(err).context_with(|| format!("failed to read {}", path))?,
     };
     Ok(Some(body))
 }
@@ -1906,7 +1910,7 @@ fn write_run_output_log(path: &Path, pieces: &[AgentRunOutputPiece]) -> Result<(
         pieces: pieces.to_vec(),
     };
     let body = serde_json::to_string_pretty(&log).context("failed to encode automation output")?;
-    fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))
+    Ok(fs::write(path, body).context_with(|| format!("failed to write {}", path.display()))?)
 }
 
 async fn push_codex_output_piece(

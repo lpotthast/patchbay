@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
     TransactionTrait,
@@ -278,7 +278,7 @@ pub async fn update_project(
     let updated = active
         .update(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to update project '{name}'"))?;
+        .context_with(|| format!("failed to update project '{name}'"))?;
     let view = ProjectView::from(updated);
     events::publish_project_list_changed();
     events::publish_project_changed(&view.name);
@@ -294,7 +294,7 @@ pub async fn update_system_prompt(store: &Store, name: &str, body: String) -> Re
     let updated = active
         .update(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to update system prompt for project '{name}'"))?;
+        .context_with(|| format!("failed to update system prompt for project '{name}'"))?;
     let view = ProjectView::from(updated);
     events::publish_project_changed(&view.name);
     Ok(view)
@@ -451,7 +451,7 @@ async fn change_memory(
     let updated = active
         .update(&txn)
         .await
-        .with_context(|| format!("failed to update memory for project '{name}'"))?;
+        .context_with(|| format!("failed to update memory for project '{name}'"))?;
     let event = record_memory_changed_event_in_tx(&txn, &updated, operation, &source).await?;
     txn.commit()
         .await
@@ -468,13 +468,13 @@ async fn latest_memory_event(
     store: &Store,
     project_id: i64,
 ) -> Result<Option<work_item_event::Model>> {
-    work_item_event::Entity::find()
+    Ok(work_item_event::Entity::find()
         .filter(work_item_event::Column::ProjectId.eq(project_id))
         .filter(work_item_event::Column::EventType.eq(MEMORY_CHANGED_EVENT_TYPE))
         .order_by_desc(work_item_event::Column::Id)
         .one(store.db().as_ref())
         .await
-        .context("failed to load latest project memory event")
+        .context("failed to load latest project memory event")?)
 }
 
 async fn record_memory_changed_event_in_tx<C>(
@@ -612,7 +612,7 @@ pub async fn update_settings(
     let updated = active
         .update(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to update settings for project '{project_name}'"))?;
+        .context_with(|| format!("failed to update settings for project '{project_name}'"))?;
     let settings = project_settings_to_view(updated)?;
     events::publish_project_changed(project_name);
     Ok(settings)
@@ -631,7 +631,7 @@ pub async fn delete_project(store: &Store, name: &str) -> Result<()> {
     Project::delete_by_id(project.id)
         .exec(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to delete project '{name}'"))?;
+        .context_with(|| format!("failed to delete project '{name}'"))?;
     events::publish_project_list_changed();
     Ok(())
 }
@@ -680,8 +680,8 @@ pub(crate) async fn refresh_project_path_status(
     let project = Project::find_by_id(project_id)
         .one(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to load project {project_id} for path status check"))?
-        .ok_or_else(|| anyhow::anyhow!("project {project_id} does not exist"))?;
+        .context_with(|| format!("failed to load project {project_id} for path status check"))?
+        .ok_or_else(|| report!("project {project_id} does not exist"))?;
     update_project_path_status(store, project, utc_now()).await
 }
 
@@ -693,8 +693,8 @@ pub(crate) async fn project_name_by_id(store: &Store, project_id: i64) -> Result
     Ok(Project::find_by_id(project_id)
         .one(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to load project {project_id}"))?
-        .ok_or_else(|| anyhow::anyhow!("project {project_id} does not exist"))?
+        .context_with(|| format!("failed to load project {project_id}"))?
+        .ok_or_else(|| report!("project {project_id} does not exist"))?
         .name)
 }
 
@@ -703,8 +703,8 @@ pub(crate) async fn find_project_by_name(store: &Store, name: &str) -> Result<Pr
         .filter(project::Column::Name.eq(name))
         .one(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to load project '{name}'"))?
-        .ok_or_else(|| anyhow::anyhow!("project '{name}' does not exist"))
+        .context_with(|| format!("failed to load project '{name}'"))?
+        .ok_or_else(|| report!("project '{name}' does not exist"))
 }
 
 fn validate_project_name(name: &str) -> Result<()> {

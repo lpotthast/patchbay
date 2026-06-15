@@ -5,7 +5,7 @@ use std::{
     process::Stdio,
 };
 
-use anyhow::{Context, Result, bail};
+use rootcause::{Result, prelude::*};
 
 use crate::backend::{projects, storage::Store};
 
@@ -69,7 +69,7 @@ impl WorkspaceOpenCommand {
             .stderr(Stdio::piped())
             .output()
             .await
-            .with_context(|| format!("failed to start {}", self.program.to_string_lossy()))?;
+            .context_with(|| format!("failed to start {}", self.program.to_string_lossy()))?;
 
         if output.status.success() {
             return Ok(());
@@ -95,7 +95,7 @@ pub(crate) async fn project_workspace_path(store: &Store, project_name: &str) ->
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("project '{project_name}' has no workspace path"))?;
+        .ok_or_else(|| report!("project '{project_name}' has no workspace path"))?;
     existing_workspace_path(path)
 }
 
@@ -103,7 +103,7 @@ pub(crate) fn existing_workspace_path(path: impl AsRef<Path>) -> Result<PathBuf>
     let path = path.as_ref();
     let canonical = path
         .canonicalize()
-        .with_context(|| format!("workspace path '{}' does not exist", path.display()))?;
+        .context_with(|| format!("workspace path '{}' does not exist", path.display()))?;
     if !canonical.is_dir() {
         bail!(
             "workspace path '{}' is not a directory",

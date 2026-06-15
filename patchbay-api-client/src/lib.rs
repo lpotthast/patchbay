@@ -1,4 +1,3 @@
-use anyhow::{Context, Result, bail};
 use patchbay_types::{
     AddCommentRequest, AgentRunView, ApiError, ClaimWorkItemRequest, ClaimWorkItemResponse,
     CommentView, CreateWorkItemLabelRequest, CreateWorkItemRequest, DeleteWorkItemLabelResponse,
@@ -7,6 +6,7 @@ use patchbay_types::{
     ProjectView, ReleaseWorkItemRequest, RunLogView, UpdateProjectMemoryRequest,
     UpdateWorkItemLabelRequest, UpdateWorkItemRequest, WorkItemLabelView, WorkItemView,
 };
+use rootcause::{Result, prelude::*};
 use serde::{Serialize, de::DeserializeOwned};
 
 #[derive(Clone, Debug)]
@@ -298,7 +298,7 @@ impl PatchbayClient {
         let response = request
             .send()
             .await
-            .with_context(|| format!("failed to call Patchbay API at {}", self.base_url))?;
+            .context_with(|| format!("failed to call Patchbay API at {}", self.base_url))?;
         let status = response.status();
         let bytes = response
             .bytes()
@@ -313,7 +313,7 @@ impl PatchbayClient {
             bail!("Patchbay API returned {status}: {body}");
         }
 
-        serde_json::from_slice(&bytes).context("failed to decode Patchbay API response")
+        Ok(serde_json::from_slice(&bytes).context("failed to decode Patchbay API response")?)
     }
 
     fn url(&self, path: &str) -> String {

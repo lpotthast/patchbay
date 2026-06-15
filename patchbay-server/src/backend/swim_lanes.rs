@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
 };
@@ -56,7 +56,7 @@ where
             .filter(swim_lane::Column::Identifier.eq(identifier))
             .one(conn)
             .await
-            .with_context(|| format!("failed to check swim-lane '{identifier}'"))?
+            .context_with(|| format!("failed to check swim-lane '{identifier}'"))?
             .is_some()
         {
             continue;
@@ -75,7 +75,7 @@ where
         active
             .insert(conn)
             .await
-            .with_context(|| format!("failed to create swim-lane '{identifier}'"))?;
+            .context_with(|| format!("failed to create swim-lane '{identifier}'"))?;
     }
     Ok(())
 }

@@ -10,7 +10,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
 use async_stream::stream;
 use axum::{
     Extension, Form, Json, Router,
@@ -29,6 +28,7 @@ use crudkit_rs::impl_add_crud_routes;
 use futures_core::Stream;
 use leptos::prelude::{LeptosOptions, get_configuration};
 use leptos_axum::{LeptosRoutes, generate_route_list};
+use rootcause::{Result, prelude::*};
 
 use crate::{
     backend::{
@@ -434,7 +434,7 @@ async fn cancel_active_sessions(store: &Store, sessions: &ProcessSessionRegistry
     }
 }
 
-async fn error_response(err: impl Into<anyhow::Error>) -> Response {
+async fn error_response(err: impl Into<Report>) -> Response {
     let err = err.into();
     Redirect::to(&format!(
         "/error?message={}",
@@ -498,7 +498,7 @@ async fn choose_folder_path_linux() -> Result<Option<String>> {
         {
             Ok(output) => return folder_path_from_output(output, &[]),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("failed to start {command}")),
+            Err(err) => return Err(err).context_with(|| format!("failed to start {command}"))?,
         }
     }
     bail!("no supported Linux folder picker found; install zenity or kdialog")
@@ -789,7 +789,7 @@ async fn open_database_directory(
             .path()
             .parent()
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("database path has no parent directory"))?;
+            .ok_or_else(|| report!("database path has no parent directory"))?;
         workspace::open_workspace_path(WorkspaceOpenTarget::Folder, directory).await
     }
     .await;
@@ -915,7 +915,7 @@ async fn start_automation(
         *state.codex_status.write().await = status;
         events::publish_codex_status_changed();
         if !usable {
-            return error_response(anyhow::anyhow!(message)).await;
+            return error_response(report!(message)).await;
         }
         state
             .automation_controller

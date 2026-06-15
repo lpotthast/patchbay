@@ -1,10 +1,10 @@
 use std::{collections::HashMap, fs, path::Path, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
 use codex_app_server_sdk::{
     ClientError, Codex, CodexClient, StdioConfig,
     requests::{ClientInfo, GetAccountParams, InitializeParams},
 };
+use rootcause::{Result, prelude::*};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{sync::watch, time::timeout};
@@ -51,7 +51,7 @@ pub async fn app_server_status(store: &Store) -> CodexAppServerStatusView {
     }
     match agent_tools::resolve_tool_path(store, AgentToolName::Codex)
         .await
-        .with_context(|| {
+        .context_with(|| {
             format!(
                 "Patchbay cannot start Codex automation because Codex is not configured or discoverable. {CODEX_INSTALL_PROMPT}"
             )
@@ -94,7 +94,7 @@ pub async fn logout_current_account(store: &Store) -> Result<CodexAppServerStatu
     ensure_codex_home()?;
     let codex_binary = agent_tools::resolve_tool_path(store, AgentToolName::Codex)
         .await
-        .with_context(|| {
+        .context_with(|| {
             format!(
                 "Patchbay cannot log out of Codex because Codex is not configured or discoverable. {CODEX_INSTALL_PROMPT}"
             )
@@ -105,7 +105,7 @@ pub async fn logout_current_account(store: &Store) -> Result<CodexAppServerStatu
             .account_logout()
             .await
             .context("Codex app-server rejected logout")?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), Report>(())
     })
     .await
     .context("timed out while logging out of Codex")??;
@@ -117,7 +117,7 @@ pub async fn ensure_app_server_usable(codex_binary: &Path) -> Result<CodexAppSer
     if status.usable {
         return Ok(status);
     }
-    anyhow::bail!("{}", status.message)
+    bail!("{}", status.message)
 }
 
 async fn app_server_status_for_binary(
@@ -563,9 +563,9 @@ pub async fn spawn_codex_with_env(
     let mut config = stdio_config(codex_binary);
     env.extend(codex_environment()?);
     config.env = env;
-    Codex::spawn_stdio(config)
+    Ok(Codex::spawn_stdio(config)
         .await
-        .context("failed to start Codex app-server")
+        .context("failed to start Codex app-server")?)
 }
 
 pub fn codex_home_dir() -> PathBuf {
@@ -637,7 +637,7 @@ fn codex_config_path_for_home(codex_home: &Path) -> PathBuf {
 }
 
 fn ensure_codex_home_at(codex_home: &Path) -> Result<()> {
-    fs::create_dir_all(codex_home).with_context(|| {
+    fs::create_dir_all(codex_home).context_with(|| {
         format!(
             "failed to create Patchbay Codex home {}",
             codex_home.display()
@@ -645,7 +645,7 @@ fn ensure_codex_home_at(codex_home: &Path) -> Result<()> {
     })?;
     let config_path = codex_config_path_for_home(codex_home);
     fs::write(&config_path, CODEX_CONFIG)
-        .with_context(|| format!("failed to write Codex config {}", config_path.display()))?;
+        .context_with(|| format!("failed to write Codex config {}", config_path.display()))?;
     Ok(())
 }
 

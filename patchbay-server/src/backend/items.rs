@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
 use crudkit_core::condition::{
     Condition, ConditionClause, ConditionClauseValue, ConditionElement, Operator,
 };
+use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, Statement, TransactionTrait,
@@ -1125,8 +1125,8 @@ pub(crate) async fn get_item_model(
         .filter(work_item::Column::ProjectId.eq(project_id))
         .one(store.db().as_ref())
         .await
-        .with_context(|| format!("failed to load item {item_id}"))?
-        .ok_or_else(|| anyhow::anyhow!("item {item_id} does not exist in this project"))
+        .context_with(|| format!("failed to load item {item_id}"))?
+        .ok_or_else(|| report!("item {item_id} does not exist in this project"))
 }
 
 pub(crate) async fn get_item_model_in_tx<C>(
@@ -1141,8 +1141,8 @@ where
         .filter(work_item::Column::ProjectId.eq(project_id))
         .one(conn)
         .await
-        .with_context(|| format!("failed to load item {item_id}"))?
-        .ok_or_else(|| anyhow::anyhow!("item {item_id} does not exist in this project"))
+        .context_with(|| format!("failed to load item {item_id}"))?
+        .ok_or_else(|| report!("item {item_id} does not exist in this project"))
 }
 
 async fn get_label_model_in_tx<C>(
@@ -1159,8 +1159,8 @@ where
         .filter(work_item_label::Column::WorkItemId.eq(item_id))
         .one(conn)
         .await
-        .with_context(|| format!("failed to load label {label_id}"))?
-        .ok_or_else(|| anyhow::anyhow!("label {label_id} does not exist on item {item_id}"))
+        .context_with(|| format!("failed to load label {label_id}"))?
+        .ok_or_else(|| report!("label {label_id} does not exist on item {item_id}"))
 }
 
 async fn item_ids_with_state<C>(conn: &C, project_id: i64, state: &str) -> Result<Vec<i64>>
@@ -1173,7 +1173,7 @@ where
         .filter(work_item_label::Column::Value.eq(state))
         .all(conn)
         .await
-        .with_context(|| format!("failed to list items with state label '{state}'"))?;
+        .context_with(|| format!("failed to list items with state label '{state}'"))?;
     Ok(labels.into_iter().map(|label| label.work_item_id).collect())
 }
 
@@ -1197,10 +1197,10 @@ where
         updated_at: Set(now),
         ..Default::default()
     };
-    active
+    Ok(active
         .insert(conn)
         .await
-        .with_context(|| format!("failed to add label '{}'", format_label(key, value)))
+        .context_with(|| format!("failed to add label '{}'", format_label(key, value)))?)
 }
 
 async fn upsert_label_in_tx<C>(
@@ -1219,15 +1219,15 @@ where
         .filter(work_item_label::Column::Key.eq(key))
         .one(conn)
         .await
-        .with_context(|| format!("failed to load label '{key}'"))?
+        .context_with(|| format!("failed to load label '{key}'"))?
     {
         let mut active: WorkItemLabelActiveModel = existing.into();
         active.value = Set(value.map(ToOwned::to_owned));
         active.updated_at = Set(utc_now());
-        active
+        Ok(active
             .update(conn)
             .await
-            .with_context(|| format!("failed to update label '{key}'"))
+            .context_with(|| format!("failed to update label '{key}'"))?)
     } else {
         insert_label_in_tx(conn, project_id, item_id, key, value).await
     }
@@ -1248,7 +1248,7 @@ where
         .filter(work_item_label::Column::Key.eq(key))
         .exec(conn)
         .await
-        .with_context(|| format!("failed to delete label '{key}'"))?;
+        .context_with(|| format!("failed to delete label '{key}'"))?;
     Ok(())
 }
 
@@ -1299,10 +1299,10 @@ where
     let mut active: WorkItemActiveModel = item.into();
     active.version = Set(version + 1);
     active.updated_at = Set(utc_now());
-    active
+    Ok(active
         .update(conn)
         .await
-        .context("failed to update item version")
+        .context("failed to update item version")?)
 }
 
 pub(crate) async fn record_event_in_tx<C>(
@@ -1351,7 +1351,7 @@ where
     let event = active
         .insert(conn)
         .await
-        .with_context(|| format!("failed to record event {event_type}"))?;
+        .context_with(|| format!("failed to record event {event_type}"))?;
     Ok(event)
 }
 
@@ -1373,10 +1373,10 @@ where
         created_at: Set(utc_now()),
         ..Default::default()
     };
-    active
+    Ok(active
         .insert(conn)
         .await
-        .context("failed to add item comment")
+        .context("failed to add item comment")?)
 }
 
 async fn models_to_views(store: &Store, items: Vec<WorkItemModel>) -> Result<Vec<WorkItemView>> {

@@ -50,7 +50,6 @@ hydrate = [
     "leptonic/hydrate",
 ]
 ssr = [
-    "dep:anyhow",
     "dep:async-stream",
     "dep:async-trait",
     "dep:axum",
@@ -66,6 +65,7 @@ ssr = [
     "dep:leptos-use",
     "dep:leptos_axum",
     "dep:paste",
+    "dep:rootcause",
     "dep:sea-orm",
     "dep:sea-orm-migration",
     "dep:serde",
@@ -84,7 +84,6 @@ ssr = [
 ]
 
 [dependencies]
-anyhow = { version = "1", optional = true }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", features = ["ws"], optional = true }
@@ -109,6 +108,7 @@ leptos-routes = "0.3.1"
 leptos_router = "=0.8.11"
 paste = { version = "1", optional = true }
 patchbay-types = { path = "../patchbay-types" }
+rootcause = { version = "0.13.0", optional = true }
 sea-orm = { version = "0.12.15", features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite", "with-json", "with-time"], optional = true }
 sea-orm-migration = { version = "0.12.15", features = ["runtime-tokio-rustls", "sqlx-sqlite"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
