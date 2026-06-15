@@ -1,0 +1,17 @@
+[package]
+name = "patchbay-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "patchbay"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+patchbay-api-client = { path = "../patchbay-api-client" }
+patchbay-types = { path = "../patchbay-types" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

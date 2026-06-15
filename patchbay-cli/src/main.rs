@@ -1,0 +1,990 @@
+use std::{env, time::Duration};
+
+use anyhow::{Context, Result, bail};
+use clap::{Args, Parser, Subcommand};
+use patchbay_api_client::PatchbayClient;
+use patchbay_types::{
+    AddCommentRequest, AgentReasoningEffort, AgentRunOutputPiece, AuthorType, ClaimWorkItemRequest,
+    CreateWorkItemRequest, FinishWorkItemRequest, ProgressWorkItemRequest, ReleaseWorkItemRequest,
+    UpdateProjectMemoryRequest, UpdateWorkItemRequest, WorkState,
+};
+use serde::Serialize;
+
+const DEFAULT_API_URL: &str = "http://127.0.0.1:4000";
+
+#[derive(Debug, Parser)]
+#[command(name = "patchbay")]
+#[command(about = "Patchbay agent-facing API relay")]
+struct Cli {
+    /// Override the Patchbay API URL.
+    #[arg(long)]
+    api_url: Option<String>,
+
+    /// Override the project context.
+    #[arg(long)]
+    project: Option<String>,
+
+    /// Override the agent id.
+    #[arg(long)]
+    agent: Option<String>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Work with project-scoped items.
+    Item {
+        #[command(subcommand)]
+        command: ItemCommand,
+    },
+    /// Read and add item comments.
+    Comment {
+        #[command(subcommand)]
+        command: CommentCommand,
+    },
+    /// Read and update project memory.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Inspect automation runs and logs.
+    Automation {
+        #[command(subcommand)]
+        command: AutomationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ItemCommand {
+    /// List project work items.
+    List(ItemListArgs),
+    /// Show one item; defaults to the claimed item.
+    Show(ItemIdArgs),
+    /// Create a new work item.
+    Create(ItemCreateArgs),
+    /// Edit item fields.
+    Update(ItemUpdateArgs),
+    /// Claim the next available item for this agent.
+    Claim(ItemClaimArgs),
+    /// Add an agent progress comment.
+    Progress(ItemProgressArgs),
+    /// Mark an item done with a final report.
+    Finish(ItemFinishArgs),
+    /// Release an item back to the queue.
+    Release(ItemReleaseArgs),
+    /// Poll an item and print version changes.
+    Watch(ItemWatchArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum CommentCommand {
+    /// Add a comment to an item.
+    Add(CommentAddArgs),
+    /// List comments on an item.
+    List(ItemIdArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Show current project memory.
+    Show(JsonArgs),
+    /// List project memory change events.
+    History(JsonArgs),
+    /// Replace project memory.
+    Set(MemoryWriteArgs),
+    /// Append text to project memory.
+    Append(MemoryWriteArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum AutomationCommand {
+    /// List automation runs.
+    Runs(AutomationRunsArgs),
+    /// Show one automation run log.
+    Log(AutomationRunLogArgs),
+}
+
+#[derive(Debug, Args)]
+struct ItemListArgs {
+    /// Filter items by state.
+    #[arg(long)]
+    state: Option<WorkState>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemIdArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemCreateArgs {
+    /// Title for the new item.
+    #[arg(long)]
+    title: String,
+
+    /// Full task description.
+    #[arg(long)]
+    description: String,
+
+    /// Exclude the item from automation claims.
+    #[arg(long)]
+    unclaimable: bool,
+
+    /// Agent model override for this item.
+    #[arg(long)]
+    agent_model: Option<String>,
+
+    /// Reasoning effort override for this item.
+    #[arg(long)]
+    agent_reasoning_effort: Option<AgentReasoningEffort>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemUpdateArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Replace the item title.
+    #[arg(long)]
+    title: Option<String>,
+
+    /// Replace the item description.
+    #[arg(long)]
+    description: Option<String>,
+
+    /// Move the item to a new state.
+    #[arg(long)]
+    state: Option<WorkState>,
+
+    /// Set whether automation may claim the item.
+    #[arg(long)]
+    automation_claimable: Option<bool>,
+
+    /// Set the item-specific agent model.
+    #[arg(long)]
+    agent_model: Option<String>,
+
+    /// Clear the item-specific agent model.
+    #[arg(long)]
+    clear_agent_model: bool,
+
+    /// Set the item-specific reasoning effort.
+    #[arg(long)]
+    agent_reasoning_effort: Option<AgentReasoningEffort>,
+
+    /// Clear the item-specific reasoning effort.
+    #[arg(long)]
+    clear_agent_reasoning_effort: bool,
+
+    /// Require the current item version.
+    #[arg(long)]
+    expect_version: Option<i64>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemClaimArgs {
+    /// State to claim from.
+    #[arg(long, default_value = "open")]
+    state: WorkState,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemProgressArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Progress text to record.
+    #[arg(long)]
+    body: String,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemFinishArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Final report text.
+    #[arg(long)]
+    report: String,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemReleaseArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Optional release note.
+    #[arg(long)]
+    comment: Option<String>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ItemWatchArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Only print versions newer than this value.
+    #[arg(long)]
+    since_version: Option<i64>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CommentAddArgs {
+    /// Item id; defaults to the claimed item when available.
+    item_id: Option<i64>,
+
+    /// Comment text.
+    #[arg(long)]
+    body: String,
+
+    /// Display name for the author.
+    #[arg(long)]
+    author: Option<String>,
+
+    /// Author type for the comment.
+    #[arg(long, default_value = "user")]
+    author_type: AuthorType,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct AutomationRunsArgs {
+    /// Maximum number of runs to show.
+    #[arg(long)]
+    limit: Option<u64>,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct AutomationRunLogArgs {
+    /// Automation run id.
+    run_id: i64,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct JsonArgs {
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryWriteArgs {
+    /// Memory text to write.
+    #[arg(long)]
+    body: String,
+
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedContext {
+    api_url: String,
+    project: Option<String>,
+    agent_id: Option<String>,
+    claimed_item_id: Option<i64>,
+}
+
+impl ResolvedContext {
+    fn client(&self) -> PatchbayClient {
+        PatchbayClient::new(self.api_url.clone())
+    }
+
+    fn project(&self) -> Result<&str> {
+        self.project
+            .as_deref()
+            .context("missing Patchbay project; pass --project or set PATCHBAY_PROJECT")
+    }
+
+    fn agent_id(&self) -> Result<&str> {
+        self.agent_id
+            .as_deref()
+            .context("missing Patchbay agent id; pass --agent or set PATCHBAY_AGENT_ID")
+    }
+
+    fn item_id(&self, explicit: Option<i64>) -> Result<i64> {
+        explicit
+            .or(self.claimed_item_id)
+            .context("missing item id; pass an item id or set PATCHBAY_CLAIMED_ITEM_ID")
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let context =
+        resolve_context(&cli, |key| env::var(key)).context("failed to resolve Patchbay context")?;
+    run(cli.command, context).await
+}
+
+async fn run(command: Command, context: ResolvedContext) -> Result<()> {
+    match command {
+        Command::Item { command } => run_item(command, context).await,
+        Command::Comment { command } => run_comment(command, context).await,
+        Command::Memory { command } => run_memory(command, context).await,
+        Command::Automation { command } => run_automation(command, context).await,
+    }
+}
+
+async fn run_item(command: ItemCommand, context: ResolvedContext) -> Result<()> {
+    let client = context.client();
+    let project = context.project()?;
+    match command {
+        ItemCommand::List(args) => {
+            let items = client.list_items(project, args.state).await?;
+            output(args.json, &items, || {
+                for item in &items {
+                    println!(
+                        "#{}\t{}\tv{}\t{}",
+                        item.id,
+                        item.state.label(),
+                        item.version,
+                        item.title
+                    );
+                }
+            })
+        }
+        ItemCommand::Show(args) => {
+            let item = client
+                .get_item(project, context.item_id(args.item_id)?)
+                .await?;
+            output(args.json, &item, || {
+                println!("#{} [{}] v{}", item.id, item.state.label(), item.version);
+                println!("{}", item.title);
+                if let Some(agent) = &item.claimed_by {
+                    println!("claimed by: {agent}");
+                }
+                println!();
+                println!("{}", item.description);
+            })
+        }
+        ItemCommand::Create(args) => {
+            let item = client
+                .create_item(
+                    project,
+                    &CreateWorkItemRequest {
+                        title: args.title,
+                        description: args.description,
+                        automation_claimable: !args.unclaimable,
+                        agent_model_override: args.agent_model,
+                        agent_reasoning_effort_override: args.agent_reasoning_effort,
+                    },
+                )
+                .await?;
+            output(args.json, &item, || {
+                println!("Created item #{}: {}", item.id, item.title);
+            })
+        }
+        ItemCommand::Update(args) => {
+            let item_id = context.item_id(args.item_id)?;
+            let request = UpdateWorkItemRequest {
+                title: args.title,
+                description: args.description,
+                state: args.state,
+                automation_claimable: args.automation_claimable,
+                agent_model_override: optional_override(args.agent_model, args.clear_agent_model),
+                agent_reasoning_effort_override: optional_override(
+                    args.agent_reasoning_effort,
+                    args.clear_agent_reasoning_effort,
+                ),
+                expect_version: args.expect_version,
+            };
+            let item = client.update_item(project, item_id, &request).await?;
+            output(args.json, &item, || {
+                println!("Updated item #{} v{}", item.id, item.version);
+            })
+        }
+        ItemCommand::Claim(args) => {
+            let agent_id = context.agent_id()?;
+            let claimed = client
+                .claim_item(
+                    project,
+                    &ClaimWorkItemRequest {
+                        agent_id: agent_id.to_owned(),
+                        state: args.state,
+                    },
+                )
+                .await?;
+            if let Some(item) = claimed.item {
+                output(args.json, &item, || {
+                    println!("Claimed item #{} for {}", item.id, agent_id);
+                })
+            } else if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "claimed": false,
+                        "project": project,
+                        "state": args.state,
+                    }))?
+                );
+                Ok(())
+            } else {
+                println!("No matching item available");
+                Ok(())
+            }
+        }
+        ItemCommand::Progress(args) => {
+            let item_id = context.item_id(args.item_id)?;
+            let agent_id = context.agent_id()?;
+            let comment = client
+                .progress_item(
+                    project,
+                    item_id,
+                    &ProgressWorkItemRequest {
+                        agent_id: agent_id.to_owned(),
+                        body: args.body,
+                    },
+                )
+                .await?;
+            output(args.json, &comment, || {
+                println!("Recorded progress comment #{}", comment.id);
+            })
+        }
+        ItemCommand::Finish(args) => {
+            let item_id = context.item_id(args.item_id)?;
+            let agent_id = context.agent_id()?;
+            let item = client
+                .finish_item(
+                    project,
+                    item_id,
+                    &FinishWorkItemRequest {
+                        agent_id: agent_id.to_owned(),
+                        report: args.report,
+                    },
+                )
+                .await?;
+            output(args.json, &item, || {
+                println!("Finished item #{} v{}", item.id, item.version);
+            })
+        }
+        ItemCommand::Release(args) => {
+            let item_id = context.item_id(args.item_id)?;
+            let agent_id = context.agent_id()?;
+            let item = client
+                .release_item(
+                    project,
+                    item_id,
+                    &ReleaseWorkItemRequest {
+                        agent_id: agent_id.to_owned(),
+                        comment: args.comment,
+                    },
+                )
+                .await?;
+            output(args.json, &item, || {
+                println!("Released item #{} back to {}", item.id, item.state.label());
+            })
+        }
+        ItemCommand::Watch(args) => {
+            let item_id = context.item_id(args.item_id)?;
+            let mut last_version = args.since_version.unwrap_or(0);
+            loop {
+                let item = client.get_item(project, item_id).await?;
+                if item.version > last_version {
+                    last_version = item.version;
+                    output(args.json, &item, || {
+                        println!(
+                            "#{}\t{}\tv{}\t{}",
+                            item.id,
+                            item.state.label(),
+                            item.version,
+                            item.title
+                        );
+                    })?;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn run_comment(command: CommentCommand, context: ResolvedContext) -> Result<()> {
+    let client = context.client();
+    let project = context.project()?;
+    match command {
+        CommentCommand::Add(args) => {
+            let item_id = context.item_id(args.item_id)?;
+            let comment = client
+                .add_comment(
+                    project,
+                    item_id,
+                    &AddCommentRequest {
+                        author_type: args.author_type,
+                        author_name: args.author,
+                        body: args.body,
+                    },
+                )
+                .await?;
+            output(args.json, &comment, || {
+                println!(
+                    "Added comment #{} to item #{}",
+                    comment.id, comment.work_item_id
+                );
+            })
+        }
+        CommentCommand::List(args) => {
+            let comments = client
+                .list_comments(project, context.item_id(args.item_id)?)
+                .await?;
+            output(args.json, &comments, || {
+                for comment in &comments {
+                    println!(
+                        "#{}\t{}\t{}\t{}",
+                        comment.id,
+                        comment.author_type,
+                        comment.author_name.as_deref().unwrap_or(""),
+                        comment.body
+                    );
+                }
+            })
+        }
+    }
+}
+
+async fn run_memory(command: MemoryCommand, context: ResolvedContext) -> Result<()> {
+    let client = context.client();
+    let project = context.project()?;
+    match command {
+        MemoryCommand::Show(args) => {
+            let memory = client.get_project_memory(project).await?;
+            output(args.json, &memory, || {
+                println!("{}", memory.memory);
+            })
+        }
+        MemoryCommand::History(args) => {
+            let events = client.list_project_memory_events(project).await?;
+            output(args.json, &events, || {
+                for event in &events {
+                    println!(
+                        "#{}\t{}\t{}\t{}",
+                        event.id,
+                        event.operation,
+                        event.created_at,
+                        event
+                            .actor_id
+                            .as_deref()
+                            .or(event.actor_type.as_deref())
+                            .unwrap_or("")
+                    );
+                }
+            })
+        }
+        MemoryCommand::Set(args) => {
+            let agent_id = context.agent_id()?;
+            let update = client
+                .set_project_memory(
+                    project,
+                    &UpdateProjectMemoryRequest {
+                        agent_id: agent_id.to_owned(),
+                        agent_run_id: None,
+                        body: args.body,
+                    },
+                )
+                .await?;
+            output(args.json, &update, || {
+                println!(
+                    "Updated memory for project {} with event #{}",
+                    update.project.name, update.event.id
+                );
+            })
+        }
+        MemoryCommand::Append(args) => {
+            let agent_id = context.agent_id()?;
+            let update = client
+                .append_project_memory(
+                    project,
+                    &UpdateProjectMemoryRequest {
+                        agent_id: agent_id.to_owned(),
+                        agent_run_id: None,
+                        body: args.body,
+                    },
+                )
+                .await?;
+            output(args.json, &update, || {
+                println!(
+                    "Appended memory for project {} with event #{}",
+                    update.project.name, update.event.id
+                );
+            })
+        }
+    }
+}
+
+async fn run_automation(command: AutomationCommand, context: ResolvedContext) -> Result<()> {
+    let client = context.client();
+    let project = context.project()?;
+    match command {
+        AutomationCommand::Runs(args) => {
+            let runs = client.list_runs(project, args.limit).await?;
+            output(args.json, &runs, || {
+                for run in &runs {
+                    println!(
+                        "#{}\t{}\t{}\t{}\t{}",
+                        run.id, run.status, run.mode, run.tool_name, run.result_summary
+                    );
+                }
+            })
+        }
+        AutomationCommand::Log(args) => {
+            let log = client.read_run_log(project, args.run_id).await?;
+            output(args.json, &log, || {
+                println!("run #{} {}", log.run.id, log.run.status);
+                println!("summary: {}", log.run.result_summary);
+                println!();
+                println!("output:");
+                print_output_pieces(&log.output);
+                if let Some(prompt) = &log.prompt {
+                    println!();
+                    println!("prompt:");
+                    println!("{prompt}");
+                }
+            })
+        }
+    }
+}
+
+fn resolve_context(
+    cli: &Cli,
+    env_value: impl Fn(&str) -> std::result::Result<String, env::VarError>,
+) -> Result<ResolvedContext> {
+    let api_url = cli
+        .api_url
+        .clone()
+        .or_else(|| env_value("PATCHBAY_API_URL").ok())
+        .or_else(|| env_value("PATCHBAY_URL").ok())
+        .unwrap_or_else(|| DEFAULT_API_URL.to_owned());
+    if api_url.trim().is_empty() {
+        bail!("Patchbay API URL cannot be empty");
+    }
+
+    let claimed_item_id = match env_value("PATCHBAY_CLAIMED_ITEM_ID").ok() {
+        Some(raw) if !raw.trim().is_empty() => Some(
+            raw.parse::<i64>()
+                .with_context(|| format!("invalid PATCHBAY_CLAIMED_ITEM_ID '{raw}'"))?,
+        ),
+        _ => None,
+    };
+
+    Ok(ResolvedContext {
+        api_url,
+        project: cli
+            .project
+            .clone()
+            .or_else(|| env_value("PATCHBAY_PROJECT").ok()),
+        agent_id: cli
+            .agent
+            .clone()
+            .or_else(|| env_value("PATCHBAY_AGENT_ID").ok()),
+        claimed_item_id,
+    })
+}
+
+fn optional_override<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
+    if clear { Some(None) } else { value.map(Some) }
+}
+
+fn print_output_pieces(output: &[AgentRunOutputPiece]) {
+    if output.is_empty() {
+        println!("(empty)");
+        return;
+    }
+    for piece in output {
+        println!("[#{} {}] {}", piece.sequence, piece.kind, piece.title);
+        if !piece.body.trim().is_empty() {
+            println!("{}", piece.body);
+        }
+        if let Some(tool_output) = output_metadata_text(piece) {
+            println!("output:");
+            println!("{tool_output}");
+        }
+    }
+}
+
+fn output_metadata_text(piece: &AgentRunOutputPiece) -> Option<String> {
+    ["output", "result", "content_items", "error"]
+        .into_iter()
+        .find_map(|key| metadata_value_text(&piece.metadata, key))
+}
+
+fn metadata_value_text(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    let value = metadata.get(key)?;
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(values) if values.is_empty() => None,
+        serde_json::Value::Object(values) if values.is_empty() => None,
+        value => serde_json::to_string_pretty(value).ok(),
+    }
+}
+
+fn output<T>(json: bool, value: &T, text: impl FnOnce()) -> Result<()>
+where
+    T: Serialize,
+{
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        text();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_from<'a>(
+        entries: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str) -> std::result::Result<String, env::VarError> + 'a {
+        move |key| {
+            entries
+                .iter()
+                .find(|(entry_key, _)| *entry_key == key)
+                .map(|(_, value)| value.to_string())
+                .ok_or(env::VarError::NotPresent)
+        }
+    }
+
+    fn cli() -> Cli {
+        Cli {
+            api_url: None,
+            project: None,
+            agent: None,
+            command: Command::Item {
+                command: ItemCommand::List(ItemListArgs {
+                    state: None,
+                    json: false,
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn context_uses_api_url_project_agent_and_claimed_item_env() {
+        let context = resolve_context(
+            &cli(),
+            env_from(&[
+                ("PATCHBAY_API_URL", "http://127.0.0.1:4100"),
+                ("PATCHBAY_PROJECT", "demo"),
+                ("PATCHBAY_AGENT_ID", "patchbay-run-1"),
+                ("PATCHBAY_CLAIMED_ITEM_ID", "42"),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(context.api_url, "http://127.0.0.1:4100");
+        assert_eq!(context.project.as_deref(), Some("demo"));
+        assert_eq!(context.agent_id.as_deref(), Some("patchbay-run-1"));
+        assert_eq!(context.claimed_item_id, Some(42));
+    }
+
+    #[test]
+    fn explicit_context_overrides_environment() {
+        let mut cli = cli();
+        cli.api_url = Some("http://127.0.0.1:5000".to_owned());
+        cli.project = Some("override".to_owned());
+        cli.agent = Some("human".to_owned());
+
+        let context = resolve_context(
+            &cli,
+            env_from(&[
+                ("PATCHBAY_API_URL", "http://127.0.0.1:4100"),
+                ("PATCHBAY_PROJECT", "demo"),
+                ("PATCHBAY_AGENT_ID", "patchbay-run-1"),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(context.api_url, "http://127.0.0.1:5000");
+        assert_eq!(context.project.as_deref(), Some("override"));
+        assert_eq!(context.agent_id.as_deref(), Some("human"));
+    }
+
+    #[test]
+    fn item_id_prefers_explicit_value_over_claimed_item_env() {
+        let context = ResolvedContext {
+            api_url: DEFAULT_API_URL.to_owned(),
+            project: Some("demo".to_owned()),
+            agent_id: Some("patchbay-run-1".to_owned()),
+            claimed_item_id: Some(42),
+        };
+
+        assert_eq!(context.item_id(Some(124)).unwrap(), 124);
+        assert_eq!(context.item_id(None).unwrap(), 42);
+    }
+
+    #[test]
+    fn api_url_falls_back_to_patchbay_url_then_local_default() {
+        let context = resolve_context(
+            &cli(),
+            env_from(&[("PATCHBAY_URL", "http://127.0.0.1:4200")]),
+        )
+        .unwrap();
+        assert_eq!(context.api_url, "http://127.0.0.1:4200");
+
+        let context = resolve_context(&cli(), env_from(&[])).unwrap();
+        assert_eq!(context.api_url, DEFAULT_API_URL);
+    }
+
+    fn help_output(args: &[&str]) -> String {
+        let error = Cli::try_parse_from(args).expect_err("help should stop parsing");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        error.to_string()
+    }
+
+    fn assert_command_tree_has_help(command: &clap::Command, path: &mut Vec<String>) {
+        for arg in command.get_arguments() {
+            let id = arg.get_id().as_str();
+            if id == "help" || id == "version" {
+                continue;
+            }
+            assert!(
+                arg.get_help()
+                    .is_some_and(|help| !help.to_string().trim().is_empty()),
+                "missing help for argument {id} on {}",
+                path.join(" ")
+            );
+        }
+
+        for subcommand in command.get_subcommands() {
+            if subcommand.get_name() == "help" {
+                continue;
+            }
+            path.push(subcommand.get_name().to_owned());
+            assert!(
+                subcommand
+                    .get_about()
+                    .or_else(|| subcommand.get_long_about())
+                    .is_some_and(|about| !about.to_string().trim().is_empty()),
+                "missing help for command {}",
+                path.join(" ")
+            );
+            assert_command_tree_has_help(subcommand, path);
+            path.pop();
+        }
+    }
+
+    #[test]
+    fn clap_metadata_covers_every_command_and_argument() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let mut path = vec![command.get_name().to_owned()];
+        assert_command_tree_has_help(&command, &mut path);
+    }
+
+    #[test]
+    fn help_describes_command_groups_and_subcommands() {
+        let root = help_output(&["patchbay", "--help"]);
+        assert!(root.contains("Work with project-scoped items"));
+        assert!(root.contains("Read and add item comments"));
+        assert!(root.contains("Read and update project memory"));
+        assert!(root.contains("Inspect automation runs and logs"));
+        assert!(root.contains("Override the Patchbay API URL"));
+        assert!(root.contains("Override the project context"));
+        assert!(root.contains("Override the agent id"));
+
+        let item = help_output(&["patchbay", "item", "--help"]);
+        assert!(item.contains("List project work items"));
+        assert!(item.contains("Show one item; defaults to the claimed item"));
+        assert!(item.contains("Create a new work item"));
+        assert!(item.contains("Edit item fields"));
+        assert!(item.contains("Claim the next available item for this agent"));
+        assert!(item.contains("Add an agent progress comment"));
+        assert!(item.contains("Mark an item done with a final report"));
+        assert!(item.contains("Release an item back to the queue"));
+        assert!(item.contains("Poll an item and print version changes"));
+
+        let comment = help_output(&["patchbay", "comment", "--help"]);
+        assert!(comment.contains("Add a comment to an item"));
+        assert!(comment.contains("List comments on an item"));
+
+        let memory = help_output(&["patchbay", "memory", "--help"]);
+        assert!(memory.contains("Show current project memory"));
+        assert!(memory.contains("List project memory change events"));
+        assert!(memory.contains("Replace project memory"));
+        assert!(memory.contains("Append text to project memory"));
+
+        let automation = help_output(&["patchbay", "automation", "--help"]);
+        assert!(automation.contains("List automation runs"));
+        assert!(automation.contains("Show one automation run log"));
+    }
+
+    #[test]
+    fn leaf_help_describes_arguments() {
+        let create = help_output(&["patchbay", "item", "create", "--help"]);
+        assert!(create.contains("Title for the new item"));
+        assert!(create.contains("Full task description"));
+        assert!(create.contains("Exclude the item from automation claims"));
+        assert!(create.contains("Reasoning effort override for this item"));
+        assert!(create.contains("Print JSON instead of text"));
+
+        let update = help_output(&["patchbay", "item", "update", "--help"]);
+        assert!(update.contains("Item id; defaults to the claimed item"));
+        assert!(update.contains("Set whether automation may claim the item"));
+        assert!(update.contains("Clear the item-specific agent model"));
+        assert!(update.contains("Require the current item version"));
+
+        let progress = help_output(&["patchbay", "item", "progress", "--help"]);
+        assert!(progress.contains("Progress text to record"));
+
+        let comment = help_output(&["patchbay", "comment", "add", "--help"]);
+        assert!(comment.contains("Comment text"));
+        assert!(comment.contains("Author type for the comment"));
+
+        let memory = help_output(&["patchbay", "memory", "append", "--help"]);
+        assert!(memory.contains("Memory text to write"));
+
+        let automation = help_output(&["patchbay", "automation", "log", "--help"]);
+        assert!(automation.contains("Automation run id"));
+    }
+}

@@ -1,0 +1,3 @@
+[submodule "crudkit"]
+	path = crudkit
+	url = git@github.com:lpotthast/crudkit.git

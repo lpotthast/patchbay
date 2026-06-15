@@ -1,0 +1,135 @@
+[package]
+name = "patchbay-server"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.leptonic]
+style-dir = "style"
+js-dir = "public/js"
+
+[package.metadata.leptos]
+hash-files = false
+hash-file-name = "hash.txt"
+lib-cargo-args = []
+bin-cargo-args = []
+output-name = "patchbay"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/main.scss"
+assets-dir = "public"
+site-addr = "127.0.0.1:4000"
+reload-port = 4001
+reload-protocol = "ws"
+watch = false
+env = "DEV"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+lib-profile-release = "wasm-release"
+graceful-shutdown = true
+graceful-shutdown-timeout-secs = 3
+graceful-shutdown-unix-signal = "SIGTERM"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["ssr"]
+hydrate = [
+    "dep:gloo-net",
+    "dep:indexmap",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:typetag",
+    "dep:urlencoding",
+    "dep:wasm-bindgen-futures",
+    "leptos/hydrate",
+    "leptonic/hydrate",
+]
+ssr = [
+    "dep:anyhow",
+    "dep:async-stream",
+    "dep:async-trait",
+    "dep:axum",
+    "dep:axum-macros",
+    "dep:clap",
+    "dep:codex-app-server-sdk",
+    "dep:crudkit-core",
+    "dep:crudkit-rs",
+    "dep:crudkit-sea-orm",
+    "dep:futures-core",
+    "dep:git2",
+    "dep:indexmap",
+    "dep:leptos_axum",
+    "dep:paste",
+    "dep:sea-orm",
+    "dep:sea-orm-migration",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:time",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:typetag",
+    "dep:utoipa",
+    "dep:urlencoding",
+    "leptos/ssr",
+    "leptos_meta/ssr",
+    "leptos_router/ssr",
+    "leptonic/ssr",
+]
+
+[dependencies]
+anyhow = { version = "1", optional = true }
+async-stream = { version = "0.3", optional = true }
+async-trait = { version = "0.1", optional = true }
+axum = { version = "0.8", optional = true }
+axum-macros = { version = "0.5", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+codex-app-server-sdk = { version = "0.5.1", optional = true }
+crudkit-core = { path = "../crudkit/crudkit-core", optional = true }
+crudkit-leptos = { path = "../crudkit/crudkit-leptos" }
+crudkit-rs = { path = "../crudkit/crudkit-rs", optional = true }
+crudkit-sea-orm = { path = "../crudkit/crudkit-sea-orm", optional = true }
+futures-core = { version = "0.3", optional = true }
+git2 = { version = "0.20", optional = true }
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"], optional = true }
+indexmap = { version = "2", features = ["serde"], optional = true }
+leptonic = { version = "0.5.0", git = "https://github.com/lpotthast/leptonic", branch = "migrate-to-leptos-0.8", features = ["tiptap"] }
+leptos = "0.8.15"
+leptos_axum = { version = "=0.8.7", optional = true }
+leptos_meta = "=0.8.5"
+leptos-routes = "0.3.1"
+leptos_router = "=0.8.11"
+paste = { version = "1", optional = true }
+patchbay-types = { path = "../patchbay-types" }
+sea-orm = { version = "0.12.15", features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite", "with-json", "with-time"], optional = true }
+sea-orm-migration = { version = "0.12.15", features = ["runtime-tokio-rustls", "sqlx-sqlite"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+time = { version = "=0.3.47", features = ["formatting", "macros", "serde", "serde-well-known"], optional = true }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tracing = { version = "0.1", optional = true }
+typetag = { version = "0.2", optional = true }
+utoipa = { version = "5", optional = true }
+urlencoding = { version = "2", optional = true }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[dev-dependencies]
+assertr = "0.6.0"
+browser-test = "0.2.1"
+leptos-browser-test = "0.2.0"
+tempfile = "3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+debug = false
+codegen-units = 1
+panic = "abort"

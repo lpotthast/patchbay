@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+shim_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+repo_root=$(CDPATH= cd "$shim_dir/.." && pwd)
+cli_manifest="$repo_root/patchbay-cli/Cargo.toml"
+
+# This development shim runs the CLI through Cargo. Cargo would normally write
+# build output inside the Patchbay checkout, but Patchbay-launched Codex agents
+# run with a workspace-write sandbox for the target project. Use a writable temp
+# target dir unless the caller already chose one.
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  default_target_dir="${TMPDIR:-/tmp}/patchbay-cli-target"
+  CARGO_TARGET_DIR="${PATCHBAY_CLI_TARGET_DIR:-$default_target_dir}"
+  export CARGO_TARGET_DIR
+fi
+
+cd "$repo_root"
+exec cargo run -q --manifest-path "$cli_manifest" -- "$@"

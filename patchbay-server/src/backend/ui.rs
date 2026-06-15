@@ -1,0 +1,1603 @@
+use std::{
+    collections::{HashMap, HashSet},
+    convert::Infallible,
+    io,
+    net::IpAddr,
+    net::SocketAddr,
+    path::PathBuf,
+    process::Output,
+    sync::{Arc, LazyLock, RwLock},
+    time::Duration,
+};
+
+use anyhow::{Context, Result, bail};
+use async_stream::stream;
+use axum::{
+    Extension, Form, Json, Router,
+    extract::{Path, Query},
+    http::StatusCode,
+    response::{
+        IntoResponse, Redirect, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
+    routing::{get, post},
+};
+use crudkit_rs::impl_add_crud_routes;
+use futures_core::Stream;
+use leptos::prelude::{LeptosOptions, get_configuration};
+use leptos_axum::{LeptosRoutes, generate_route_list};
+
+use crate::{
+    backend::{
+        agent_tools, api,
+        automation::{self, StartAutomation},
+        automation_controller::AutomationController,
+        automation_triggers::{self, CreateAutomationTrigger},
+        codex_app_server,
+        comments::{self, AddComment},
+        crudkit_resources,
+        items::{self, CreateWorkItem, UpdateWorkItem},
+        process_sessions::ProcessSessionRegistry,
+        projects::{self, UpdateProjectSettings},
+        storage::Store,
+        workspace::{self, WorkspaceOpenTarget},
+    },
+    frontend::{
+        self, ApiDocsPage, BoardPage, BoardRunSessionView, CodexStatusPage, ItemPage, ProjectsPage,
+        RunLogPage, RuntimeConfigView, TriggersPage,
+    },
+    shared::view_models::{
+        AgentReasoningEffort, AgentToolName, AuthorType, AutomationMode, CodexAppServerStatusView,
+        ProcessSessionView, TriggerKind, WorkState, WorkspaceMode, WorktreeCleanupPolicy,
+    },
+};
+
+impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudProjectResource,
+    project
+);
+impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudWorkItemResource,
+    work_item
+);
+impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudCommentResource,
+    comment
+);
+impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudAgentToolResource,
+    agent_tool
+);
+impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudAgentRunResource,
+    agent_run
+);
+impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudAutomationTriggerResource,
+    automation_trigger
+);
+
+#[derive(Clone)]
+pub(crate) struct AppState {
+    pub(crate) store: Store,
+    pub(crate) sessions: ProcessSessionRegistry,
+    pub(crate) automation_controller: AutomationController,
+    pub(crate) codex_status: Arc<tokio::sync::RwLock<CodexAppServerStatusView>>,
+}
+
+static APP_STATE: LazyLock<RwLock<Option<AppState>>> = LazyLock::new(|| RwLock::new(None));
+const ACTIVE_SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn app_state() -> AppState {
+    APP_STATE
+        .read()
+        .expect("Patchbay app state lock is poisoned")
+        .clone()
+        .expect("Patchbay app state must be installed before rendering")
+}
+
+fn install_app_state(state: AppState) {
+    *APP_STATE
+        .write()
+        .expect("Patchbay app state lock is poisoned") = Some(state);
+}
+
+pub async fn serve(store: Store, bind: SocketAddr) -> Result<()> {
+    automation::set_server_api_url(local_api_url(bind));
+    let contexts = crudkit_resources::build_contexts(store.clone());
+    let sessions = ProcessSessionRegistry::new();
+    let automation_controller = AutomationController::new();
+    let codex_status = codex_app_server::app_server_status(&store).await;
+    if !codex_status.usable {
+        eprintln!(
+            "{}",
+            codex_app_server::operator_guidance(&codex_status).join("\n")
+        );
+    }
+    let codex_status = Arc::new(tokio::sync::RwLock::new(codex_status));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let state = AppState {
+        store: store.clone(),
+        sessions: sessions.clone(),
+        automation_controller: automation_controller.clone(),
+        codex_status: codex_status.clone(),
+    };
+    install_app_state(state.clone());
+    let mut leptos_options = get_configuration(None)?.leptos_options;
+    leptos_options.site_addr = bind;
+    let routes = generate_route_list(frontend::App);
+    projects::spawn_path_status_checker_until(store.clone(), shutdown_rx.clone());
+    automation_triggers::spawn_scheduler_until(
+        store.clone(),
+        Some(sessions.clone()),
+        automation_controller.clone(),
+        shutdown_rx.clone(),
+    );
+
+    let mut crud_router = Router::new();
+    crud_router = axum_project_crud_routes::add_crud_routes("/api", crud_router);
+    crud_router = axum_work_item_crud_routes::add_crud_routes("/api", crud_router);
+    crud_router = axum_comment_crud_routes::add_crud_routes("/api", crud_router);
+    crud_router = axum_agent_tool_crud_routes::add_crud_routes("/api", crud_router);
+    crud_router = axum_agent_run_crud_routes::add_crud_routes("/api", crud_router);
+    crud_router = axum_automation_trigger_crud_routes::add_crud_routes("/api", crud_router);
+
+    let leptos_shell = {
+        let leptos_options = leptos_options.clone();
+        move || frontend::shell(leptos_options.clone())
+    };
+    codex_app_server::spawn_status_refresher_until(
+        store.clone(),
+        codex_status,
+        shutdown_rx.clone(),
+    );
+    let app = Router::<LeptosOptions>::new()
+        .route("/system/pick-folder", post(pick_folder))
+        .route("/system/database/open", post(open_database_directory))
+        .route("/projects", post(create_project))
+        .route("/projects/{project}/update", post(update_project))
+        .route("/projects/{project}/delete", post(delete_project))
+        .route(
+            "/projects/{project}/system-prompt",
+            post(update_system_prompt),
+        )
+        .route("/projects/{project}/memory", post(update_memory))
+        .route("/projects/{project}/memory/append", post(append_memory))
+        .route(
+            "/projects/{project}/memory/events/compact",
+            post(compact_memory_events),
+        )
+        .route("/projects/{project}/settings", post(update_settings))
+        .route(
+            "/projects/{project}/workspace/open",
+            post(open_project_workspace),
+        )
+        .route(
+            "/projects/{project}/automation/start",
+            post(start_automation),
+        )
+        .route("/projects/{project}/automation/stop", post(stop_automation))
+        .route(
+            "/projects/{project}/automation/recover-stale-claims",
+            post(recover_stale_claims),
+        )
+        .route(
+            "/projects/{project}/automation/cleanup-worktrees",
+            post(cleanup_worktrees),
+        )
+        .route(
+            "/projects/{project}/automation/runs/{run_id}/workspace/open",
+            post(open_run_workspace),
+        )
+        .route(
+            "/projects/{project}/automation/triggers",
+            post(create_automation_trigger),
+        )
+        .route(
+            "/projects/{project}/automation/triggers/{trigger_id}/delete",
+            post(delete_automation_trigger),
+        )
+        .route(
+            "/projects/{project}/automation/triggers/{trigger_id}/update",
+            post(update_automation_trigger),
+        )
+        .route("/projects/{project}/items", post(create_item))
+        .route(
+            "/projects/{project}/items/{item_id}/update",
+            post(update_item),
+        )
+        .route("/projects/{project}/items/{item_id}/move", post(move_item))
+        .route(
+            "/projects/{project}/items/{item_id}/delete",
+            post(delete_item),
+        )
+        .route(
+            "/projects/{project}/items/{item_id}/comments",
+            post(add_comment),
+        )
+        .route("/agent-tools/discover", post(discover_agent_tools))
+        .route("/codex/logout", post(logout_codex))
+        .route("/api/projects/{project}", get(api::get_project))
+        .route(
+            "/api/projects/{project}/settings",
+            get(api::get_project_settings),
+        )
+        .route(
+            "/api/projects/{project}/memory",
+            get(api::get_project_memory).put(api::set_project_memory),
+        )
+        .route(
+            "/api/projects/{project}/memory/append",
+            post(api::append_project_memory),
+        )
+        .route(
+            "/api/projects/{project}/memory/events",
+            get(api::list_project_memory_events),
+        )
+        .route(
+            "/api/projects/{project}/memory/events/compact",
+            post(api::compact_project_memory_events),
+        )
+        .route(
+            "/api/projects/{project}/items",
+            get(api::list_items).post(api::create_item),
+        )
+        .route("/api/projects/{project}/items/claim", post(api::claim_item))
+        .route(
+            "/api/projects/{project}/items/{item_id}",
+            get(api::get_item).patch(api::update_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/progress",
+            post(api::progress_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/finish",
+            post(api::finish_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/release",
+            post(api::release_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/comments",
+            get(api::list_comments).post(api::add_comment),
+        )
+        .route(
+            "/api/projects/{project}/automation/runs",
+            get(api::list_runs),
+        )
+        .route(
+            "/api/projects/{project}/automation/runs/{run_id}/log",
+            get(api::get_run_log),
+        )
+        .route("/api/projects/{project}/events", get(project_events))
+        .route(
+            "/api/projects/{project}/automation/sessions",
+            get(active_sessions),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/events",
+            get(item_events),
+        )
+        .merge(crud_router.with_state(()))
+        .leptos_routes(&leptos_options, routes, leptos_shell)
+        .fallback(leptos_axum::file_and_error_handler(frontend::shell))
+        .layer(Extension(state))
+        .layer(Extension(contexts.project))
+        .layer(Extension(contexts.work_item))
+        .layer(Extension(contexts.comment))
+        .layer(Extension(contexts.agent_tool))
+        .layer(Extension(contexts.agent_run))
+        .layer(Extension(contexts.automation_trigger))
+        .with_state(leptos_options);
+
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    println!("Serving Patchbay at http://{bind}");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(
+            store,
+            sessions,
+            automation_controller,
+            shutdown_tx,
+        ))
+        .await?;
+    Ok(())
+}
+
+fn local_api_url(bind: SocketAddr) -> String {
+    let host = match bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    format!("http://{host}:{}", bind.port())
+}
+
+async fn shutdown_signal(
+    store: Store,
+    sessions: ProcessSessionRegistry,
+    automation_controller: AutomationController,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+) {
+    wait_for_shutdown_signal().await;
+    let _ = shutdown_tx.send(true);
+    automation_controller.shutdown_all(&sessions).await;
+    cancel_active_sessions(&store, &sessions).await;
+}
+
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            eprintln!("failed to install Ctrl+C handler: {err}");
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let terminate = async {
+            match signal(SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(err) => {
+                    eprintln!("failed to install SIGTERM handler: {err}");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+    }
+}
+
+async fn cancel_active_sessions(store: &Store, sessions: &ProcessSessionRegistry) {
+    let active = sessions.list_all().await;
+    let mut projects = active
+        .into_iter()
+        .map(|session| session.project_name)
+        .collect::<Vec<_>>();
+    projects.sort();
+    projects.dedup();
+
+    sessions.cancel_all().await;
+    if let Err(_elapsed) = tokio::time::timeout(ACTIVE_SESSION_SHUTDOWN_TIMEOUT, async {
+        loop {
+            if sessions.list_all().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    {
+        eprintln!("timed out waiting for active automation sessions to stop");
+    }
+
+    for project in projects {
+        if let Err(err) = automation::stop_automation(store, &project).await {
+            eprintln!("failed to mark running automation cancelled for project {project}: {err:#}");
+        }
+    }
+}
+
+async fn error_response(err: impl Into<anyhow::Error>) -> Response {
+    let err = err.into();
+    Redirect::to(&format!(
+        "/error?message={}",
+        urlencoding::encode(&err.to_string())
+    ))
+    .into_response()
+}
+
+#[derive(serde::Serialize)]
+struct PickFolderResponse {
+    path: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ErrorJson {
+    error: String,
+}
+
+async fn pick_folder() -> Response {
+    match choose_folder_path().await {
+        Ok(path) => Json(PickFolderResponse { path }).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorJson {
+                error: err.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn choose_folder_path() -> Result<Option<String>> {
+    match std::env::consts::OS {
+        "macos" => choose_folder_path_macos().await,
+        "linux" => choose_folder_path_linux().await,
+        "windows" => choose_folder_path_windows().await,
+        other => bail!("folder picker is not supported on {other}"),
+    }
+}
+
+async fn choose_folder_path_macos() -> Result<Option<String>> {
+    let output = tokio::process::Command::new("osascript")
+        .arg("-e")
+        .arg(r#"POSIX path of (choose folder with prompt "Choose project folder")"#)
+        .output()
+        .await
+        .context("failed to start macOS folder picker")?;
+    folder_path_from_output(output, &["User canceled"])
+}
+
+async fn choose_folder_path_linux() -> Result<Option<String>> {
+    let pickers: [(&str, &[&str]); 2] = [
+        ("zenity", &["--file-selection", "--directory"]),
+        ("kdialog", &["--getexistingdirectory"]),
+    ];
+    for (command, args) in pickers {
+        match tokio::process::Command::new(command)
+            .args(args)
+            .output()
+            .await
+        {
+            Ok(output) => return folder_path_from_output(output, &[]),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("failed to start {command}")),
+        }
+    }
+    bail!("no supported Linux folder picker found; install zenity or kdialog")
+}
+
+async fn choose_folder_path_windows() -> Result<Option<String>> {
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Choose project folder'
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::WriteLine($dialog.SelectedPath)
+}
+"#;
+    let output = tokio::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .await
+        .context("failed to start Windows folder picker")?;
+    folder_path_from_output(output, &[])
+}
+
+fn folder_path_from_output(output: Output, cancel_markers: &[&str]) -> Result<Option<String>> {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() {
+        return Ok((!stdout.is_empty()).then_some(stdout));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let canceled_by_message = cancel_markers.iter().any(|marker| stderr.contains(marker));
+    if canceled_by_message || output.status.code() == Some(1) && stdout.is_empty() {
+        return Ok(None);
+    }
+
+    bail!(
+        "folder picker failed{}",
+        if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", stderr.trim())
+        }
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct CreateProjectForm {
+    name: String,
+    display_name: Option<String>,
+    path: String,
+    default_agent_model: Option<String>,
+    system_prompt: Option<String>,
+    memory: Option<String>,
+}
+
+async fn create_project(
+    Extension(state): Extension<AppState>,
+    Form(form): Form<CreateProjectForm>,
+) -> Response {
+    let display_name = form.display_name.filter(|value| !value.trim().is_empty());
+    let path = PathBuf::from(form.path);
+    let system_prompt = form.system_prompt.filter(|value| !value.trim().is_empty());
+    let memory = form.memory.filter(|value| !value.trim().is_empty());
+    match projects::create_project(
+        &state.store,
+        projects::CreateProject {
+            name: form.name.clone(),
+            display_name,
+            path,
+            default_agent_model: form.default_agent_model,
+            system_prompt,
+            memory,
+        },
+    )
+    .await
+    {
+        Ok(project) => Redirect::to(&format!("/?project={}", urlencoding::encode(&project.name)))
+            .into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateProjectForm {
+    display_name: String,
+    path: Option<String>,
+}
+
+async fn update_project(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<UpdateProjectForm>,
+) -> Response {
+    let display_name = Some(form.display_name);
+    let path = form
+        .path
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    match projects::update_project(
+        &state.store,
+        &project,
+        projects::UpdateProject { display_name, path },
+    )
+    .await
+    {
+        Ok(_) => Redirect::to(&format!(
+            "/projects?project={}",
+            urlencoding::encode(&project)
+        ))
+        .into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn delete_project(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Response {
+    match projects::delete_project(&state.store, &project).await {
+        Ok(()) => Redirect::to("/projects").into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ProjectTextForm {
+    body: String,
+}
+
+async fn update_system_prompt(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<ProjectTextForm>,
+) -> Response {
+    match projects::update_system_prompt(&state.store, &project, form.body).await {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn update_memory(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<ProjectTextForm>,
+) -> Response {
+    match projects::update_memory_with_source(
+        &state.store,
+        &project,
+        form.body,
+        projects::MemoryChangeSource::User,
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn append_memory(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<ProjectTextForm>,
+) -> Response {
+    match projects::append_memory_with_source(
+        &state.store,
+        &project,
+        form.body,
+        projects::MemoryChangeSource::User,
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn compact_memory_events(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Response {
+    match projects::compact_memory_events(&state.store, &project).await {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateSettingsForm {
+    workspace_mode: String,
+    max_code_edit_agents: i64,
+    allow_refinement_agents_during_editing: Option<String>,
+    create_pr: Option<String>,
+    stale_claim_minutes: i64,
+    worktree_cleanup_policy: String,
+    default_agent_tool: String,
+    default_agent_model: Option<String>,
+    default_agent_reasoning_effort: Option<String>,
+}
+
+async fn update_settings(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<UpdateSettingsForm>,
+) -> Response {
+    let workspace_mode = match form.workspace_mode.parse::<WorkspaceMode>() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    let worktree_cleanup_policy = match form
+        .worktree_cleanup_policy
+        .parse::<WorktreeCleanupPolicy>()
+    {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    let default_agent_tool = match form.default_agent_tool.parse::<AgentToolName>() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    let default_agent_reasoning_effort =
+        match parse_optional_reasoning_effort(form.default_agent_reasoning_effort) {
+            Ok(value) => value,
+            Err(err) => return error_response(err).await,
+        };
+
+    match projects::update_settings(
+        &state.store,
+        &project,
+        UpdateProjectSettings {
+            workspace_mode: Some(workspace_mode),
+            max_code_edit_agents: Some(form.max_code_edit_agents),
+            allow_refinement_agents_during_editing: Some(
+                form.allow_refinement_agents_during_editing.is_some(),
+            ),
+            create_pr: Some(form.create_pr.is_some()),
+            stale_claim_minutes: Some(form.stale_claim_minutes),
+            worktree_cleanup_policy: Some(worktree_cleanup_policy),
+            default_agent_tool: Some(default_agent_tool),
+            default_agent_model: Some(
+                form.default_agent_model
+                    .filter(|value| !value.trim().is_empty()),
+            ),
+            default_agent_reasoning_effort: Some(default_agent_reasoning_effort),
+        },
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OpenWorkspaceForm {
+    target: String,
+    return_to: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenDirectoryForm {
+    return_to: Option<String>,
+}
+
+async fn open_database_directory(
+    Extension(state): Extension<AppState>,
+    Form(form): Form<OpenDirectoryForm>,
+) -> Response {
+    let return_to = safe_return_to(form.return_to, "/".to_owned());
+    let result = async {
+        let directory = state
+            .store
+            .path()
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("database path has no parent directory"))?;
+        workspace::open_workspace_path(WorkspaceOpenTarget::Folder, directory).await
+    }
+    .await;
+
+    match result {
+        Ok(()) => Redirect::to(&return_to).into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn open_project_workspace(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<OpenWorkspaceForm>,
+) -> Response {
+    let return_to = safe_return_to(
+        form.return_to,
+        format!("/?project={}", urlencoding::encode(&project)),
+    );
+    let target = match WorkspaceOpenTarget::parse(&form.target) {
+        Ok(target) => target,
+        Err(err) => return error_response(err).await,
+    };
+    let result = async {
+        let path = workspace::project_workspace_path(&state.store, &project).await?;
+        workspace::open_workspace_path(target, path).await
+    }
+    .await;
+
+    match result {
+        Ok(()) => Redirect::to(&return_to).into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn open_run_workspace(
+    Extension(state): Extension<AppState>,
+    Path((project, run_id)): Path<(String, i64)>,
+    Form(form): Form<OpenWorkspaceForm>,
+) -> Response {
+    let return_to = safe_return_to(
+        form.return_to,
+        format!(
+            "/projects/{}/automation/runs/{}/log",
+            urlencoding::encode(&project),
+            run_id
+        ),
+    );
+    let target = match WorkspaceOpenTarget::parse(&form.target) {
+        Ok(target) => target,
+        Err(err) => return error_response(err).await,
+    };
+    let result = async {
+        let run = automation::get_run(&state.store, &project, run_id).await?;
+        workspace::open_workspace_path(target, run.working_dir).await
+    }
+    .await;
+
+    match result {
+        Ok(()) => Redirect::to(&return_to).into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+fn safe_return_to(return_to: Option<String>, fallback: String) -> String {
+    return_to
+        .filter(|target| target.starts_with('/') && !target.starts_with("//"))
+        .unwrap_or(fallback)
+}
+
+#[derive(serde::Deserialize)]
+struct StartAutomationForm {
+    mode: String,
+    tool: Option<String>,
+    item_id: Option<i64>,
+    prompt: Option<String>,
+}
+
+async fn start_automation(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<StartAutomationForm>,
+) -> Response {
+    let mode = match form.mode.parse::<AutomationMode>() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    let tool = match form.tool.filter(|value| !value.trim().is_empty()) {
+        Some(tool) => match tool.parse::<AgentToolName>() {
+            Ok(value) => Some(value),
+            Err(err) => return error_response(err).await,
+        },
+        None => None,
+    };
+    let is_one_shot = mode != AutomationMode::Execute
+        || tool.is_some()
+        || form.item_id.is_some()
+        || form
+            .prompt
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty());
+
+    let result = if is_one_shot {
+        automation::start_one_automation_run_in_background(
+            state.store.clone(),
+            project.clone(),
+            StartAutomation {
+                mode,
+                tool,
+                work_item_id: form.item_id,
+                extra_prompt: form.prompt.filter(|value| !value.trim().is_empty()),
+                trigger: None,
+            },
+            Some(state.sessions.clone()),
+        )
+        .await
+        .map(|_| ())
+    } else {
+        let status = codex_app_server::app_server_status(&state.store).await;
+        let usable = status.usable;
+        let message = status.message.clone();
+        *state.codex_status.write().await = status;
+        if !usable {
+            return error_response(anyhow::anyhow!(message)).await;
+        }
+        state
+            .automation_controller
+            .start_project(state.store.clone(), project.clone(), state.sessions.clone())
+            .await
+    };
+
+    match result {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn stop_automation(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Response {
+    match state
+        .automation_controller
+        .stop_project(&project, &state.sessions)
+        .await
+    {
+        Ok(()) => match automation::stop_automation(&state.store, &project).await {
+            Ok(_) => Redirect::to(&format!("/?project={}", urlencoding::encode(&project)))
+                .into_response(),
+            Err(err) => error_response(err).await,
+        },
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn recover_stale_claims(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Response {
+    match automation::recover_stale_claims_for_project(&state.store, &project, None).await {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn cleanup_worktrees(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Response {
+    match automation::cleanup_worktrees(&state.store, &project, None).await {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn active_sessions(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Json<Vec<ProcessSessionView>> {
+    Json(state.sessions.list_for_project(&project).await)
+}
+
+#[derive(serde::Deserialize)]
+struct CreateAutomationTriggerForm {
+    name: String,
+    kind: String,
+    schedule: Option<String>,
+    mode: Option<String>,
+    tool: Option<String>,
+    prompt: Option<String>,
+}
+
+async fn create_automation_trigger(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<CreateAutomationTriggerForm>,
+) -> Response {
+    let trigger_kind = match form.kind.parse::<TriggerKind>() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    let mode = match form.mode.filter(|value| !value.trim().is_empty()) {
+        Some(mode) => match mode.parse::<AutomationMode>() {
+            Ok(value) => Some(value),
+            Err(err) => return error_response(err).await,
+        },
+        None => None,
+    };
+    let tool_name = match form.tool.filter(|value| !value.trim().is_empty()) {
+        Some(tool) => match tool.parse::<AgentToolName>() {
+            Ok(value) => Some(value),
+            Err(err) => return error_response(err).await,
+        },
+        None => None,
+    };
+    match automation_triggers::create_trigger(
+        &state.store,
+        &project,
+        CreateAutomationTrigger {
+            name: form.name,
+            enabled: true,
+            trigger_kind,
+            schedule: form.schedule.filter(|value| !value.trim().is_empty()),
+            mode,
+            tool_name,
+            prompt: form.prompt.unwrap_or_default(),
+        },
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn delete_automation_trigger(
+    Extension(state): Extension<AppState>,
+    Path((project, trigger_id)): Path<(String, i64)>,
+) -> Response {
+    match automation_triggers::delete_trigger(&state.store, &project, trigger_id).await {
+        Ok(()) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateAutomationTriggerForm {
+    name: String,
+    kind: String,
+    schedule: Option<String>,
+    enabled: Option<String>,
+    prompt: Option<String>,
+}
+
+async fn update_automation_trigger(
+    Extension(state): Extension<AppState>,
+    Path((project, trigger_id)): Path<(String, i64)>,
+    Form(form): Form<UpdateAutomationTriggerForm>,
+) -> Response {
+    let trigger_kind = match form.kind.parse::<TriggerKind>() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    match automation_triggers::update_trigger(
+        &state.store,
+        &project,
+        trigger_id,
+        automation_triggers::UpdateAutomationTrigger {
+            name: form.name,
+            enabled: form.enabled.is_some(),
+            trigger_kind,
+            schedule: form.schedule.filter(|value| !value.trim().is_empty()),
+            prompt: form.prompt.unwrap_or_default(),
+        },
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DiscoverAgentToolsForm {
+    project: Option<String>,
+    return_to: Option<String>,
+}
+
+async fn discover_agent_tools(
+    Extension(state): Extension<AppState>,
+    Form(form): Form<DiscoverAgentToolsForm>,
+) -> Response {
+    match agent_tools::discover_tools(&state.store).await {
+        Ok(_) => {
+            let status = codex_app_server::app_server_status(&state.store).await;
+            *state.codex_status.write().await = status;
+            let target = codex_return_target(form.return_to, form.project);
+            Redirect::to(&target).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn logout_codex(
+    Extension(state): Extension<AppState>,
+    Form(form): Form<DiscoverAgentToolsForm>,
+) -> Response {
+    match codex_app_server::logout_current_account(&state.store).await {
+        Ok(status) => {
+            *state.codex_status.write().await = status;
+            let target = codex_return_target(form.return_to, form.project);
+            Redirect::to(&target).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+fn codex_return_target(return_to: Option<String>, project: Option<String>) -> String {
+    return_to
+        .filter(|target| target.starts_with('/') && !target.starts_with("//"))
+        .or_else(|| {
+            project
+                .filter(|project| !project.trim().is_empty())
+                .map(|project| format!("/?project={}", urlencoding::encode(&project)))
+        })
+        .unwrap_or_else(|| "/projects".to_owned())
+}
+
+#[derive(serde::Deserialize)]
+struct CreateItemForm {
+    title: String,
+    description: String,
+    automation_claimable: Option<String>,
+    agent_model_override: Option<String>,
+    agent_reasoning_effort_override: Option<String>,
+}
+
+async fn create_item(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<CreateItemForm>,
+) -> Response {
+    match items::create_item(
+        &state.store,
+        &project,
+        CreateWorkItem {
+            title: form.title,
+            description: form.description,
+            automation_claimable: form.automation_claimable.is_some(),
+            agent_model_override: form
+                .agent_model_override
+                .filter(|value| !value.trim().is_empty()),
+            agent_reasoning_effort_override: match parse_optional_reasoning_effort(
+                form.agent_reasoning_effort_override,
+            ) {
+                Ok(value) => value,
+                Err(err) => return error_response(err).await,
+            },
+        },
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+fn parse_optional_reasoning_effort(value: Option<String>) -> Result<Option<AgentReasoningEffort>> {
+    match value.filter(|value| !value.trim().is_empty()) {
+        Some(value) => Ok(Some(value.parse::<AgentReasoningEffort>()?)),
+        None => Ok(None),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateItemForm {
+    title: String,
+    description: String,
+    version: i64,
+    automation_claimable: Option<String>,
+    agent_model_override: Option<String>,
+    agent_reasoning_effort_override: Option<String>,
+}
+
+async fn update_item(
+    Extension(state): Extension<AppState>,
+    Path((project, item_id)): Path<(String, i64)>,
+    Form(form): Form<UpdateItemForm>,
+) -> Response {
+    let agent_reasoning_effort_override =
+        match parse_optional_reasoning_effort(form.agent_reasoning_effort_override) {
+            Ok(value) => value,
+            Err(err) => return error_response(err).await,
+        };
+    match items::update_item(
+        &state.store,
+        &project,
+        item_id,
+        UpdateWorkItem {
+            title: Some(form.title),
+            description: Some(form.description),
+            automation_claimable: Some(form.automation_claimable.is_some()),
+            agent_model_override: Some(
+                form.agent_model_override
+                    .filter(|value| !value.trim().is_empty()),
+            ),
+            agent_reasoning_effort_override: Some(agent_reasoning_effort_override),
+            expect_version: Some(form.version),
+        },
+    )
+    .await
+    {
+        Ok(_) => Redirect::to(&format!(
+            "/projects/{}/items/{}",
+            urlencoding::encode(&project),
+            item_id
+        ))
+        .into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MoveItemForm {
+    state: String,
+    version: i64,
+}
+
+async fn move_item(
+    Extension(state): Extension<AppState>,
+    Path((project, item_id)): Path<(String, i64)>,
+    Form(form): Form<MoveItemForm>,
+) -> Response {
+    let parsed_state = match form.state.parse::<WorkState>() {
+        Ok(state) => state,
+        Err(err) => return error_response(err).await,
+    };
+
+    match items::move_item(
+        &state.store,
+        &project,
+        item_id,
+        parsed_state,
+        Some(form.version),
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+async fn delete_item(
+    Extension(state): Extension<AppState>,
+    Path((project, item_id)): Path<(String, i64)>,
+) -> Response {
+    match items::delete_item(&state.store, &project, item_id).await {
+        Ok(()) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AddCommentForm {
+    body: String,
+    author_name: Option<String>,
+}
+
+async fn add_comment(
+    Extension(state): Extension<AppState>,
+    Path((project, item_id)): Path<(String, i64)>,
+    Form(form): Form<AddCommentForm>,
+) -> Response {
+    let author_name = form.author_name.filter(|value| !value.trim().is_empty());
+    match comments::add_comment(
+        &state.store,
+        &project,
+        item_id,
+        AddComment {
+            author_type: AuthorType::User,
+            author_name,
+            body: form.body,
+        },
+    )
+    .await
+    {
+        Ok(_) => Redirect::to(&format!(
+            "/projects/{}/items/{}",
+            urlencoding::encode(&project),
+            item_id
+        ))
+        .into_response(),
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    since: Option<i64>,
+}
+
+async fn project_events(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    event_stream(state.store.clone(), project, None, query.since)
+}
+
+async fn item_events(
+    Extension(state): Extension<AppState>,
+    Path((project, item_id)): Path<(String, i64)>,
+    Query(query): Query<EventsQuery>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    event_stream(state.store.clone(), project, Some(item_id), query.since)
+}
+
+fn event_stream(
+    store: Store,
+    project: String,
+    item_id: Option<i64>,
+    since: Option<i64>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let events = stream! {
+        let mut last_id = since;
+        loop {
+            match items::list_events(&store, &project, item_id, last_id).await {
+                Ok(new_events) => {
+                    for event in new_events {
+                        last_id = Some(event.id);
+                        let response = Event::default()
+                            .id(event.id.to_string())
+                            .event(event.event_type.clone())
+                            .json_data(&event)
+                            .unwrap_or_else(|err| {
+                                Event::default()
+                                    .event("error")
+                                    .data(format!("failed to serialize event: {err}"))
+                            });
+                        yield Ok(response);
+                    }
+                }
+                Err(err) => {
+                    yield Ok(Event::default().event("error").data(err.to_string()));
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+
+    Sse::new(events).keep_alive(KeepAlive::default())
+}
+
+pub(crate) async fn board_page_data(
+    store: &Store,
+    sessions: &ProcessSessionRegistry,
+    automation_controller: &AutomationController,
+    codex_status: CodexAppServerStatusView,
+    selected_project: Option<&str>,
+    _api_base_url: String,
+) -> Result<BoardPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let selected_project = selected_project
+        .or_else(|| projects.first().map(|project| project.name.as_str()))
+        .map(ToOwned::to_owned);
+
+    let selected_project_view = selected_project
+        .as_deref()
+        .and_then(|project| projects.iter().find(|candidate| candidate.name == project))
+        .cloned();
+
+    let mut settings = None;
+    let mut memory_events = Vec::new();
+    let mut automation_status = None;
+    let mut automation_running = false;
+    let mut run_sessions = Vec::new();
+    let mut project_items = Vec::new();
+    if let Some(project) = selected_project_view
+        .as_ref()
+        .map(|project| project.name.as_str())
+    {
+        settings = Some(projects::get_settings(store, project).await?);
+        memory_events = projects::list_memory_events(store, project).await?;
+        let status = automation::automation_status(store, project).await?;
+        automation_running = automation_controller.is_project_running(project).await;
+        let active_sessions = sessions.list_for_project(project).await;
+        run_sessions =
+            board_run_sessions(store, project, status.recent_runs.clone(), active_sessions).await?;
+        automation_status = Some(status);
+        project_items = items::list_items(store, project, None).await?;
+    }
+
+    Ok(BoardPage {
+        projects,
+        active_project_names,
+        selected_project,
+        selected_project_view,
+        settings,
+        memory_events,
+        automation_status,
+        automation_running,
+        run_sessions,
+        items: project_items,
+        codex_status,
+        runtime: runtime_config_view(store),
+    })
+}
+
+fn runtime_config_view(store: &Store) -> RuntimeConfigView {
+    RuntimeConfigView {
+        database_path: store.path().to_string_lossy().into_owned(),
+        database_directory: store
+            .path()
+            .parent()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        codex_home_path: codex_app_server::codex_home_dir()
+            .to_string_lossy()
+            .into_owned(),
+        codex_config_path: codex_app_server::codex_config_path()
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
+async fn board_run_sessions(
+    store: &Store,
+    project: &str,
+    recent_runs: Vec<crate::shared::view_models::AgentRunView>,
+    active_sessions: Vec<ProcessSessionView>,
+) -> Result<Vec<BoardRunSessionView>> {
+    let active_by_run = active_sessions
+        .into_iter()
+        .map(|session| (session.run_id, session))
+        .collect::<HashMap<_, _>>();
+    let active_ids = active_by_run.keys().copied().collect::<HashSet<_>>();
+    let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
+
+    for run in recent_runs
+        .iter()
+        .filter(|run| active_ids.contains(&run.id))
+        .cloned()
+    {
+        seen.insert(run.id);
+        ordered.push(run);
+    }
+    let missing_active_ids = active_ids
+        .iter()
+        .copied()
+        .filter(|run_id| !seen.contains(run_id))
+        .collect::<Vec<_>>();
+    for run_id in missing_active_ids {
+        let run = automation::get_run(store, project, run_id).await?;
+        seen.insert(run.id);
+        ordered.push(run);
+    }
+    for run in recent_runs
+        .into_iter()
+        .filter(|run| !seen.contains(&run.id))
+    {
+        ordered.push(run);
+    }
+
+    let mut views = Vec::with_capacity(ordered.len());
+    for run in ordered {
+        let run_id = run.id;
+        let active_session = active_by_run.get(&run_id);
+        let run_log = automation::read_run_log(store, project, run_id).await?;
+        let output = active_session
+            .filter(|session| !session.output.is_empty())
+            .map(|session| session.output.clone())
+            .unwrap_or(run_log.output);
+        views.push(BoardRunSessionView {
+            run,
+            prompt: run_log.prompt,
+            output,
+            active: active_session.is_some(),
+        });
+    }
+    Ok(views)
+}
+
+pub(crate) async fn trigger_run_sessions(
+    store: &Store,
+    sessions: &ProcessSessionRegistry,
+    project: &str,
+    trigger_id: i64,
+) -> Result<Vec<BoardRunSessionView>> {
+    let runs = automation::list_runs_for_trigger(store, project, trigger_id, None).await?;
+    let run_ids = runs.iter().map(|run| run.id).collect::<HashSet<_>>();
+    let active_sessions = sessions
+        .list_for_project(project)
+        .await
+        .into_iter()
+        .filter(|session| run_ids.contains(&session.run_id))
+        .collect::<Vec<_>>();
+    board_run_sessions(store, project, runs, active_sessions).await
+}
+
+pub(crate) async fn item_page_data(
+    store: &Store,
+    automation_controller: &AutomationController,
+    project: &str,
+    item_id: i64,
+    codex_status: CodexAppServerStatusView,
+) -> Result<ItemPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let item = items::get_item(store, project, item_id).await?;
+    let comments = comments::list_comments(store, project, item_id).await?;
+    let automation_runs = automation::list_runs_for_item(store, project, item_id, Some(10)).await?;
+    Ok(ItemPage {
+        projects,
+        active_project_names,
+        project: project.to_owned(),
+        item,
+        comments,
+        automation_runs,
+        codex_status,
+    })
+}
+
+pub(crate) async fn run_log_page_data(
+    store: &Store,
+    automation_controller: &AutomationController,
+    project: &str,
+    run_id: i64,
+    codex_status: CodexAppServerStatusView,
+) -> Result<RunLogPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let run_log = automation::read_run_log(store, project, run_id).await?;
+    Ok(RunLogPage {
+        projects,
+        active_project_names,
+        project: project.to_owned(),
+        run_log,
+        codex_status,
+    })
+}
+
+pub(crate) async fn projects_page_data(
+    store: &Store,
+    automation_controller: &AutomationController,
+    codex_status: CodexAppServerStatusView,
+    selected_project: Option<&str>,
+    api_base_url: String,
+) -> Result<ProjectsPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let selected_project = selected_project
+        .or_else(|| projects.first().map(|project| project.name.as_str()))
+        .map(ToOwned::to_owned);
+
+    Ok(ProjectsPage {
+        projects,
+        active_project_names,
+        selected_project,
+        api_base_url,
+        codex_status,
+    })
+}
+
+pub(crate) async fn triggers_page_data(
+    store: &Store,
+    automation_controller: &AutomationController,
+    codex_status: CodexAppServerStatusView,
+    selected_project: Option<&str>,
+    api_base_url: String,
+) -> Result<TriggersPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let selected_project = selected_project
+        .or_else(|| projects.first().map(|project| project.name.as_str()))
+        .map(ToOwned::to_owned);
+    let selected_project_view = selected_project
+        .as_deref()
+        .and_then(|project| projects.iter().find(|candidate| candidate.name == project))
+        .cloned();
+
+    Ok(TriggersPage {
+        projects,
+        active_project_names,
+        selected_project,
+        selected_project_view,
+        api_base_url,
+        codex_status,
+    })
+}
+
+pub(crate) async fn codex_status_page_data(
+    store: &Store,
+    automation_controller: &AutomationController,
+    codex_status: CodexAppServerStatusView,
+    selected_project: Option<&str>,
+) -> Result<CodexStatusPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let selected_project = selected_project
+        .or_else(|| projects.first().map(|project| project.name.as_str()))
+        .map(ToOwned::to_owned);
+
+    Ok(CodexStatusPage {
+        projects,
+        active_project_names,
+        selected_project,
+        codex_status,
+    })
+}
+
+pub(crate) async fn api_docs_page_data(
+    store: &Store,
+    automation_controller: &AutomationController,
+    codex_status: CodexAppServerStatusView,
+    selected_project: Option<&str>,
+) -> Result<ApiDocsPage> {
+    let projects = projects::list_projects(store).await?;
+    let active_project_names = active_project_names(store, automation_controller).await?;
+    let selected_project = selected_project
+        .or_else(|| projects.first().map(|project| project.name.as_str()))
+        .map(ToOwned::to_owned);
+
+    Ok(ApiDocsPage {
+        projects,
+        active_project_names,
+        selected_project,
+        codex_status,
+    })
+}
+
+async fn active_project_names(
+    store: &Store,
+    automation_controller: &AutomationController,
+) -> Result<Vec<String>> {
+    let mut active = automation::active_project_names(store).await?;
+    active.extend(automation_controller.active_project_names().await);
+    active.sort();
+    active.dedup();
+    Ok(active)
+}
