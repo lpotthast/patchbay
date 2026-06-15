@@ -1587,6 +1587,7 @@ pub(crate) async fn board_page_data(
     let mut run_sessions = Vec::new();
     let mut project_items = Vec::new();
     let mut project_swim_lanes = Vec::new();
+    let mut misconfigured_item_count = 0;
     if let Some(project) = selected_project_view
         .as_ref()
         .map(|project| project.name.as_str())
@@ -1601,6 +1602,7 @@ pub(crate) async fn board_page_data(
         automation_status = Some(status);
         project_items = items::list_items(store, project, None).await?;
         project_swim_lanes = swim_lanes::list_swim_lanes(store, project).await?;
+        misconfigured_item_count = items::count_items_outside_swim_lanes(store, project).await?;
     }
 
     Ok(BoardPage {
@@ -1615,6 +1617,7 @@ pub(crate) async fn board_page_data(
         run_sessions,
         items: project_items,
         swim_lanes: project_swim_lanes,
+        misconfigured_item_count,
         api_base_url,
         codex_status,
         runtime: runtime_config_view(store),
@@ -1625,6 +1628,7 @@ pub(crate) async fn board_items_section(store: &Store, project: &str) -> Result<
     Ok(BoardItemsSection {
         items: items::list_items(store, project, None).await?,
         swim_lanes: swim_lanes::list_swim_lanes(store, project).await?,
+        misconfigured_item_count: items::count_items_outside_swim_lanes(store, project).await?,
     })
 }
 

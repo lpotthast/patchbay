@@ -93,6 +93,38 @@ pub async fn list_items(
     models_to_views(store, items).await
 }
 
+pub async fn count_items_outside_swim_lanes(store: &Store, project_name: &str) -> Result<i64> {
+    let project_id = projects::project_id(store, project_name).await?;
+    let row = store
+        .db()
+        .query_one(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            r#"
+            SELECT COUNT(*) AS count
+            FROM work_items AS wi
+            WHERE wi.project_id = ?1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM work_item_labels AS wil
+                  JOIN swim_lanes AS sl
+                    ON sl.project_id = wi.project_id
+                   AND sl.identifier = wil.label_value
+                  WHERE wil.project_id = wi.project_id
+                    AND wil.work_item_id = wi.id
+                    AND wil.label_key = ?2
+              )
+            "#,
+            vec![project_id.into(), STATE_LABEL_KEY.to_owned().into()],
+        ))
+        .await
+        .context("failed to count work items outside swim-lanes")?;
+
+    row.map(|row| row.try_get::<i64>("", "count"))
+        .transpose()
+        .context("failed to read work items outside swim-lanes count")?
+        .ok_or_else(|| report!("missing work items outside swim-lanes count"))
+}
+
 pub async fn has_unclaimed_item_matching_condition(
     store: &Store,
     project_name: &str,
@@ -1740,6 +1772,120 @@ mod tests {
                 .to_string()
                 .contains("does not exist in this project")
         );
+    }
+
+    #[tokio::test]
+    async fn counts_items_outside_configured_swim_lanes() {
+        let (_temp, store) = test_store().await;
+        create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Valid item".to_owned(),
+                description: "Uses a configured swim-lane state".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Invalid item".to_owned(),
+                description: "Uses an unconfigured state".to_owned(),
+                state: "needs_triage".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let unlabeled = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Unlabeled item".to_owned(),
+                description: "Has no state label".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        create_item(
+            &store,
+            "other",
+            CreateWorkItem {
+                title: "Other project invalid item".to_owned(),
+                description: "Should not affect the demo count".to_owned(),
+                state: "needs_triage".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let project_id = projects::project_id(&store, "demo").await.unwrap();
+        delete_label_by_key_in_tx(
+            store.db().as_ref(),
+            project_id,
+            unlabeled.id,
+            STATE_LABEL_KEY,
+        )
+        .await
+        .unwrap();
+
+        let demo_count = count_items_outside_swim_lanes(&store, "demo")
+            .await
+            .unwrap();
+        let other_count = count_items_outside_swim_lanes(&store, "other")
+            .await
+            .unwrap();
+
+        assert_eq!(demo_count, 2);
+        assert_eq!(other_count, 1);
+    }
+
+    #[tokio::test]
+    async fn work_items_read_view_exposes_state_label() {
+        let (_temp, store) = test_store().await;
+        let item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Visible state".to_owned(),
+                description: "Shows state in the CrudKit read view".to_owned(),
+                state: "needs_triage".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let project_id = projects::project_id(&store, "demo").await.unwrap();
+
+        let row = store
+            .db()
+            .query_one(Statement::from_sql_and_values(
+                sea_orm::DbBackend::Sqlite,
+                r#"
+                SELECT "state_label"
+                FROM "work_items_read_view"
+                WHERE "project_id" = ?1
+                  AND "id" = ?2
+                "#,
+                vec![project_id.into(), item.id.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let state_label = row.try_get::<Option<String>>("", "state_label").unwrap();
+
+        assert_eq!(state_label.as_deref(), Some("needs_triage"));
     }
 
     #[tokio::test]

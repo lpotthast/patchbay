@@ -145,6 +145,7 @@ mod tests {
             "m20260615_000018_rename_automation_activation_require_schedule",
             "m20260615_000019_add_automation_work_item_selectors",
             "m20260615_000020_rename_automation_activation_require_schedule",
+            "m20260615_000021_add_work_item_state_label_read_view",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());

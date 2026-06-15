@@ -204,6 +204,7 @@ impl MigratorTrait for Migrator {
             Box::new(RenameAutomationActivationAndRequireScheduleTransientName),
             Box::new(AddAutomationWorkItemSelectorsTransientName),
             Box::new(RenameAutomationActivationAndRequireSchedule),
+            Box::new(AddWorkItemStateLabelReadView),
         ]
     }
 }
@@ -1498,7 +1499,7 @@ impl MigrationTrait for AddLabelsAndSwimLanes {
         migrate_work_item_state_to_labels(manager).await?;
         drop_index_if_present(manager, "idx_work_items_project_state").await?;
         drop_column_if_present(manager, "work_items", "state").await?;
-        create_read_view(manager, "work_items", "work_items_read_view").await?;
+        create_work_items_read_view(manager).await?;
         create_read_view(manager, "work_item_labels", "work_item_labels_read_view").await?;
         create_read_view(manager, "swim_lanes", "swim_lanes_read_view").await
     }
@@ -1827,6 +1828,26 @@ impl MigrationTrait for RenameAutomationActivationAndRequireSchedule {
     }
 }
 
+struct AddWorkItemStateLabelReadView;
+
+impl MigrationName for AddWorkItemStateLabelReadView {
+    fn name(&self) -> &str {
+        "m20260615_000021_add_work_item_state_label_read_view"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddWorkItemStateLabelReadView {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        create_work_items_read_view(manager).await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "work_items_read_view").await?;
+        create_read_view(manager, "work_items", "work_items_read_view").await
+    }
+}
+
 async fn seed_default_work_item_automations(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .get_connection()
@@ -2125,6 +2146,32 @@ async fn create_read_view(
                 FROM "{table_name}";
                 "#
             ),
+        ))
+        .await
+        .map(|_| ())
+}
+
+async fn create_work_items_read_view(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    drop_read_view(manager, "work_items_read_view").await?;
+    manager
+        .get_connection()
+        .execute(Statement::from_string(
+            manager.get_database_backend(),
+            r#"
+            CREATE VIEW "work_items_read_view" AS
+            SELECT
+                "work_items".*,
+                (
+                    SELECT "work_item_labels"."label_value"
+                    FROM "work_item_labels"
+                    WHERE "work_item_labels"."project_id" = "work_items"."project_id"
+                      AND "work_item_labels"."work_item_id" = "work_items"."id"
+                      AND "work_item_labels"."label_key" = 'state'
+                    LIMIT 1
+                ) AS "state_label",
+                0 AS "has_validation_errors"
+            FROM "work_items";
+            "#,
         ))
         .await
         .map(|_| ())

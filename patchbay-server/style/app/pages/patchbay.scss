@@ -1045,20 +1045,27 @@ button.link-danger {
   transform: translateY(0);
 }
 
-.all-items {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid $border;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: $shadow-sm;
-}
-
-.all-item-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+.board-state-warning {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+  padding: 12px 14px;
+  color: #6c4105;
+  background: $amber-soft;
+  border: 1px solid rgba($amber, 0.38);
+  border-left: 4px solid $amber;
+  border-radius: 8px;
+  box-shadow: $shadow-sm;
+
+  strong {
+    flex: 0 0 auto;
+    font-weight: 760;
+  }
+
+  span {
+    min-width: 0;
+  }
 }
 
 .card,

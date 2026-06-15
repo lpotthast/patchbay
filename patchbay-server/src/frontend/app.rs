@@ -70,6 +70,7 @@ use leptos_router::{
     components::{Outlet, Router},
     hooks::use_query_map,
 };
+use leptos_use::use_interval_fn;
 #[cfg(not(feature = "ssr"))]
 use leptos_use::{
     ReconnectLimit, UseWebSocketOptions, UseWebSocketReturn, use_websocket_with_options,
@@ -77,6 +78,7 @@ use leptos_use::{
 use serde::{Deserialize, Serialize};
 
 const TOOL_OUTPUT_PREVIEW_CHARS: usize = 1200;
+const BOARD_ITEMS_REFRESH_INTERVAL_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BoardPage {
@@ -91,6 +93,7 @@ pub struct BoardPage {
     pub run_sessions: Vec<BoardRunSessionView>,
     pub items: Vec<WorkItemView>,
     pub swim_lanes: Vec<SwimLaneView>,
+    pub misconfigured_item_count: i64,
     pub api_base_url: String,
     pub codex_status: CodexAppServerStatusView,
     pub runtime: RuntimeConfigView,
@@ -100,6 +103,7 @@ pub struct BoardPage {
 pub struct BoardItemsSection {
     pub items: Vec<WorkItemView>,
     pub swim_lanes: Vec<SwimLaneView>,
+    pub misconfigured_item_count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -811,6 +815,7 @@ fn board_content(page: BoardPage) -> AnyView {
         run_sessions,
         items,
         swim_lanes,
+        misconfigured_item_count,
         api_base_url,
         codex_status,
         runtime,
@@ -848,6 +853,7 @@ fn board_content(page: BoardPage) -> AnyView {
                 project=project.clone()
                 initial_items=items
                 initial_swim_lanes=swim_lanes
+                initial_misconfigured_item_count=misconfigured_item_count
                 open_create_item=open_create_item
             />
         };
@@ -2287,7 +2293,7 @@ fn WorkItemsPanel(
     project_id: i64,
 ) -> impl IntoView + 'static {
     view! {
-        <section class="work-items-admin panel">
+        <section id="work-items-admin" class="work-items-admin panel">
             <div class="panel-heading">
                 <h2>"Work items"</h2>
             </div>
@@ -2335,6 +2341,14 @@ fn work_items_crudkit_config(api_base_url: String, project_id: i64) -> CrudInsta
                 ReadWorkItemField::Title,
                 HeaderOptions {
                     display_name: "Title".into(),
+                    ..Default::default()
+                },
+            ),
+            Header::showing(
+                ReadWorkItemField::StateLabel,
+                HeaderOptions {
+                    display_name: "State label".into(),
+                    min_width: true,
                     ..Default::default()
                 },
             ),
@@ -3707,12 +3721,16 @@ fn LiveBoardItems(
     project: String,
     initial_items: Vec<WorkItemView>,
     initial_swim_lanes: Vec<SwimLaneView>,
+    initial_misconfigured_item_count: i64,
     open_create_item: Callback<String>,
 ) -> impl IntoView + 'static {
     let (items, set_items) = signal(initial_items);
     let (swim_lanes, set_swim_lanes) = signal(initial_swim_lanes);
+    let (misconfigured_item_count, set_misconfigured_item_count) =
+        signal(initial_misconfigured_item_count);
     let project_for_loader = project.clone();
     let section = LocalResource::new(move || load_board_items_section(project_for_loader.clone()));
+    let _poll = use_interval_fn(move || section.refetch(), BOARD_ITEMS_REFRESH_INTERVAL_MS);
     let project_for_events = project.clone();
     refetch_on_live_event(section, move |event| {
         event_scopes_named_project(event, Some(project_for_events.as_str()))
@@ -3726,6 +3744,7 @@ fn LiveBoardItems(
         if let Some(Ok(section)) = section.get() {
             set_items.set(section.items);
             set_swim_lanes.set(section.swim_lanes);
+            set_misconfigured_item_count.set(section.misconfigured_item_count);
         }
     });
 
@@ -3735,6 +3754,7 @@ fn LiveBoardItems(
                 project.clone(),
                 items.get(),
                 swim_lanes.get(),
+                misconfigured_item_count.get(),
                 open_create_item,
             )
         }}
@@ -4555,9 +4575,9 @@ fn board_view(
     project: String,
     items: Vec<WorkItemView>,
     swim_lanes: Vec<SwimLaneView>,
+    misconfigured_item_count: i64,
     open_create_item: Callback<String>,
 ) -> impl IntoView + 'static {
-    let all_items = items.clone();
     let lanes = swim_lanes
         .into_iter()
         .map(|lane| {
@@ -4589,21 +4609,36 @@ fn board_view(
             }
         })
         .collect::<Vec<_>>();
-    let all_cards = all_items
-        .into_iter()
-        .map(|item| item_card(project.clone(), item))
-        .collect::<Vec<_>>();
-    let all_count = all_cards.len();
+    let warning = if misconfigured_item_count > 0 {
+        let item_word = if misconfigured_item_count == 1 {
+            "item"
+        } else {
+            "items"
+        };
+        let verb = if misconfigured_item_count == 1 {
+            "is"
+        } else {
+            "are"
+        };
+        let message = format!(
+            "{misconfigured_item_count} {item_word} {verb} incorrectly labeled or unlabeled."
+        );
+
+        view! {
+            <section class="board-state-warning" role="status">
+                <strong>"Swim-lane warning"</strong>
+                <span>{message}</span>
+                <a href="#work-items-admin">"Review work items"</a>
+            </section>
+        }
+        .into_any()
+    } else {
+        ().into_any()
+    };
     view! {
         <div class="board-stack">
             <section class="board">{lanes}</section>
-            <section class="all-items">
-                <header class="lane-header">
-                    <h2>"All items"</h2>
-                    <span class="lane-count">{all_count}</span>
-                </header>
-                <div class="all-item-cards">{all_cards}</div>
-            </section>
+            {warning}
         </div>
     }
 }

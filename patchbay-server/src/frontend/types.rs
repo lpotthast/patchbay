@@ -296,6 +296,7 @@ pub mod work_item {
         pub version: i64,
         pub created_at: String,
         pub updated_at: String,
+        pub state_label: Option<String>,
         pub has_validation_errors: bool,
     }
 
