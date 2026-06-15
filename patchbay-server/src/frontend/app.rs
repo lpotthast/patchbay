@@ -34,7 +34,7 @@ use crate::{
         CodexAuthSetupView, CodexRateLimitView, CodexUsageSummaryView, CommentView,
         DEFAULT_STATE_LABEL, ProjectLabelView, ProjectMemoryEventRefView, ProjectMemoryEventView,
         ProjectSettingsView, ProjectView, RunLogView, STATE_LABEL_KEY, SwimLaneView, UiEvent,
-        UiEventKind, WorkItemLabelView, WorkItemView,
+        WorkItemLabelView, WorkItemView,
     },
 };
 #[cfg(not(feature = "ssr"))]
@@ -94,6 +94,19 @@ pub struct BoardPage {
     pub api_base_url: String,
     pub codex_status: CodexAppServerStatusView,
     pub runtime: RuntimeConfigView,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BoardItemsSection {
+    pub items: Vec<WorkItemView>,
+    pub swim_lanes: Vec<SwimLaneView>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BoardAutomationSection {
+    pub automation_status: AutomationStatusView,
+    pub automation_running: bool,
+    pub run_sessions: Vec<BoardRunSessionView>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -274,9 +287,6 @@ pub fn PageBoard() -> impl IntoView {
     let api_base_url = api_base_url();
     let page =
         LocalResource::new(move || load_board_page(selected_project.get(), api_base_url.clone()));
-    refetch_on_live_event(page, move |event| {
-        board_event_matches(event, selected_project.get())
-    });
 
     view! {
         <Title text="Patchbay"/>
@@ -303,6 +313,29 @@ async fn load_board_page(
     .map_err(|err| ServerFnError::new(err.to_string()))
 }
 
+#[server(prefix = "/leptos")]
+async fn load_board_items_section(project: String) -> Result<BoardItemsSection, ServerFnError> {
+    let state = ui::app_state();
+    ui::board_items_section(&state.store, &project)
+        .await
+        .map_err(|err| ServerFnError::new(err.to_string()))
+}
+
+#[server(prefix = "/leptos")]
+async fn load_board_automation_section(
+    project: String,
+) -> Result<BoardAutomationSection, ServerFnError> {
+    let state = ui::app_state();
+    ui::board_automation_section(
+        &state.store,
+        &state.sessions,
+        &state.automation_controller,
+        &project,
+    )
+    .await
+    .map_err(|err| ServerFnError::new(err.to_string()))
+}
+
 #[component]
 pub fn PageProjects() -> impl IntoView {
     let selected_project = selected_project_signal();
@@ -311,7 +344,6 @@ pub fn PageProjects() -> impl IntoView {
     let page = LocalResource::new(move || {
         load_projects_page(selected_project.get(), api_base_url.clone())
     });
-    refetch_on_live_event(page, projects_event_matches);
 
     view! {
         <Title text="Projects"/>
@@ -346,9 +378,6 @@ pub fn PageTriggers() -> impl IntoView {
     let api_base_url = api_base_url();
     let page = LocalResource::new(move || {
         load_triggers_page(selected_project.get(), api_base_url.clone())
-    });
-    refetch_on_live_event(page, move |event| {
-        triggers_event_matches(event, selected_project.get())
     });
 
     view! {
@@ -502,7 +531,7 @@ async fn load_run_log_page(
 pub fn PageApiDocs() -> impl IntoView {
     let selected_project = selected_project_signal();
     let page = LocalResource::new(move || load_api_docs_page(selected_project.get()));
-    refetch_on_live_event(page, projects_event_matches);
+    refetch_on_live_event(page, api_docs_event_matches);
 
     view! {
         <Title text="Patchbay API"/>
@@ -574,58 +603,39 @@ fn refetch_on_live_event<T>(
     }
 }
 
-fn board_event_matches(event: &UiEvent, selected_project: Option<String>) -> bool {
-    match event.kind {
-        UiEventKind::ProjectListChanged
-        | UiEventKind::CodexStatusChanged
-        | UiEventKind::AgentToolChanged => true,
-        UiEventKind::ProjectChanged
-        | UiEventKind::WorkItemChanged
-        | UiEventKind::CommentChanged
-        | UiEventKind::MemoryChanged
-        | UiEventKind::SwimLaneChanged
-        | UiEventKind::AutomationChanged
-        | UiEventKind::AgentRunChanged
-        | UiEventKind::AgentOutputChanged => event_scopes_selected_project(event, selected_project),
-    }
-}
-
-fn projects_event_matches(event: &UiEvent) -> bool {
-    matches!(
-        event.kind,
-        UiEventKind::ProjectListChanged
-            | UiEventKind::ProjectChanged
-            | UiEventKind::AutomationChanged
-            | UiEventKind::CodexStatusChanged
-            | UiEventKind::AgentToolChanged
-    )
-}
-
-fn triggers_event_matches(event: &UiEvent, selected_project: Option<String>) -> bool {
-    match event.kind {
-        UiEventKind::ProjectListChanged
-        | UiEventKind::CodexStatusChanged
-        | UiEventKind::AgentToolChanged => true,
-        UiEventKind::ProjectChanged | UiEventKind::AutomationChanged => {
-            event_scopes_selected_project(event, selected_project)
-        }
-        UiEventKind::WorkItemChanged
-        | UiEventKind::CommentChanged
-        | UiEventKind::MemoryChanged
-        | UiEventKind::SwimLaneChanged
-        | UiEventKind::AgentRunChanged
-        | UiEventKind::AgentOutputChanged => false,
+fn reload_crudkit_on_live_event(
+    context: ReadSignal<Option<CrudInstanceContext>>,
+    should_reload: impl Fn(&UiEvent) -> bool + 'static,
+) {
+    if let Some(live) = use_context::<LiveEventContext>() {
+        Effect::new(move |_| {
+            if let Some(event) = live.latest_event.get()
+                && should_reload(&event)
+                && let Some(context) = context.get()
+            {
+                context.reload();
+            }
+        });
     }
 }
 
 fn codex_event_matches(event: &UiEvent) -> bool {
     matches!(
-        event.kind,
-        UiEventKind::CodexStatusChanged
-            | UiEventKind::AgentToolChanged
-            | UiEventKind::ProjectListChanged
-            | UiEventKind::ProjectChanged
-            | UiEventKind::AutomationChanged
+        event,
+        UiEvent::CodexStatusChanged { .. }
+            | UiEvent::AgentToolChanged { .. }
+            | UiEvent::ProjectListChanged { .. }
+            | UiEvent::ProjectChanged { .. }
+            | UiEvent::AutomationChanged { .. }
+    )
+}
+
+fn api_docs_event_matches(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::ProjectListChanged { .. }
+            | UiEvent::ProjectChanged { .. }
+            | UiEvent::CodexStatusChanged { .. }
     )
 }
 
@@ -633,19 +643,32 @@ fn item_event_matches(event: &UiEvent, project: Option<String>, item_id: Option<
     if !event_scopes_named_project(event, project.as_deref()) {
         return false;
     }
-    match event.kind {
-        UiEventKind::ProjectListChanged
-        | UiEventKind::ProjectChanged
-        | UiEventKind::AutomationChanged
-        | UiEventKind::CodexStatusChanged
-        | UiEventKind::AgentToolChanged => true,
-        UiEventKind::WorkItemChanged | UiEventKind::CommentChanged => {
-            event.item_id.is_none() || event.item_id == item_id
+    match event {
+        UiEvent::ProjectListChanged { .. }
+        | UiEvent::ProjectChanged { .. }
+        | UiEvent::AutomationChanged { .. }
+        | UiEvent::CodexStatusChanged { .. }
+        | UiEvent::AgentToolChanged { .. } => true,
+        UiEvent::WorkItemChanged {
+            item_id: changed_item_id,
+            ..
         }
-        UiEventKind::AgentRunChanged | UiEventKind::AgentOutputChanged => {
-            event.item_id.is_some() && event.item_id == item_id
+        | UiEvent::CommentChanged {
+            item_id: changed_item_id,
+            ..
+        } => Some(*changed_item_id) == item_id,
+        UiEvent::AgentRunChanged {
+            item_id: Some(changed_item_id),
+            ..
         }
-        UiEventKind::MemoryChanged | UiEventKind::SwimLaneChanged => false,
+        | UiEvent::AgentOutputChanged {
+            item_id: Some(changed_item_id),
+            ..
+        } => Some(*changed_item_id) == item_id,
+        UiEvent::AgentRunChanged { item_id: None, .. }
+        | UiEvent::AgentOutputChanged { item_id: None, .. }
+        | UiEvent::MemoryChanged { .. }
+        | UiEvent::SwimLaneChanged { .. } => false,
     }
 }
 
@@ -653,35 +676,48 @@ fn run_log_event_matches(event: &UiEvent, project: Option<String>, run_id: Optio
     if !event_scopes_named_project(event, project.as_deref()) {
         return false;
     }
-    match event.kind {
-        UiEventKind::AgentRunChanged | UiEventKind::AgentOutputChanged => {
-            event.run_id.is_some() && event.run_id == run_id
+    match event {
+        UiEvent::AgentRunChanged {
+            run_id: changed_run_id,
+            ..
         }
-        UiEventKind::ProjectListChanged
-        | UiEventKind::ProjectChanged
-        | UiEventKind::AutomationChanged
-        | UiEventKind::CodexStatusChanged
-        | UiEventKind::AgentToolChanged => true,
-        UiEventKind::WorkItemChanged
-        | UiEventKind::CommentChanged
-        | UiEventKind::MemoryChanged
-        | UiEventKind::SwimLaneChanged => false,
-    }
-}
-
-fn event_scopes_selected_project(event: &UiEvent, selected_project: Option<String>) -> bool {
-    match (selected_project.as_deref(), event.project.as_deref()) {
-        (Some(selected), Some(project)) => selected == project,
-        (Some(_), None) => true,
-        (None, _) => true,
+        | UiEvent::AgentOutputChanged {
+            run_id: changed_run_id,
+            ..
+        } => Some(*changed_run_id) == run_id,
+        UiEvent::ProjectListChanged { .. }
+        | UiEvent::ProjectChanged { .. }
+        | UiEvent::AutomationChanged { .. }
+        | UiEvent::CodexStatusChanged { .. }
+        | UiEvent::AgentToolChanged { .. } => true,
+        UiEvent::WorkItemChanged { .. }
+        | UiEvent::CommentChanged { .. }
+        | UiEvent::MemoryChanged { .. }
+        | UiEvent::SwimLaneChanged { .. } => false,
     }
 }
 
 fn event_scopes_named_project(event: &UiEvent, project: Option<&str>) -> bool {
-    match (project, event.project.as_deref()) {
+    match (project, event_project(event)) {
         (Some(expected), Some(actual)) => expected == actual,
         (Some(_), None) => true,
         (None, _) => true,
+    }
+}
+
+fn event_project(event: &UiEvent) -> Option<&str> {
+    match event {
+        UiEvent::ProjectChanged { project, .. }
+        | UiEvent::WorkItemChanged { project, .. }
+        | UiEvent::CommentChanged { project, .. }
+        | UiEvent::MemoryChanged { project, .. }
+        | UiEvent::SwimLaneChanged { project, .. }
+        | UiEvent::AutomationChanged { project, .. }
+        | UiEvent::AgentRunChanged { project, .. }
+        | UiEvent::AgentOutputChanged { project, .. } => Some(project),
+        UiEvent::ProjectListChanged { .. }
+        | UiEvent::AgentToolChanged { .. }
+        | UiEvent::CodexStatusChanged { .. } => None,
     }
 }
 
@@ -807,7 +843,14 @@ fn board_content(page: BoardPage) -> AnyView {
             set_create_item_state.set(state);
             set_show_create_item_modal.set(true);
         });
-        let board = board_view(&project, items, swim_lanes, open_create_item);
+        let board = view! {
+            <LiveBoardItems
+                project=project.clone()
+                initial_items=items
+                initial_swim_lanes=swim_lanes
+                open_create_item=open_create_item
+            />
+        };
         let create_item = create_item_modal(
             &project,
             show_create_item_modal,
@@ -819,7 +862,14 @@ fn board_content(page: BoardPage) -> AnyView {
         let admin_project_id = project_view.id;
         let project_settings =
             project_settings_view(&project, project_view, settings, memory_events);
-        let automation_view = automation_view(&project, automation_status, run_sessions);
+        let automation_view = view! {
+            <LiveBoardAutomation
+                project=project.clone()
+                initial_status=automation_status
+                initial_running=automation_running
+                initial_run_sessions=run_sessions
+            />
+        };
         let maintenance = maintenance_view(&project);
         let runtime = runtime_panel(runtime, format!("/?project={}", encode_path(&project)));
 
@@ -847,8 +897,16 @@ fn board_content(page: BoardPage) -> AnyView {
                     {board}
                     {patchbay_labels_panel()}
                     {create_item}
-                    <WorkItemsPanel api_base_url=work_items_api_base_url project_id=admin_project_id/>
-                    <SwimLanesPanel api_base_url=swim_lanes_api_base_url project_id=admin_project_id/>
+                    <WorkItemsPanel
+                        api_base_url=work_items_api_base_url
+                        project=project.clone()
+                        project_id=admin_project_id
+                    />
+                    <SwimLanesPanel
+                        api_base_url=swim_lanes_api_base_url
+                        project=project.clone()
+                        project_id=admin_project_id
+                    />
                     {project_settings}
                     {automation_view}
                     {runtime}
@@ -920,6 +978,7 @@ fn triggers_content(page: TriggersPage) -> AnyView {
         });
         let triggers = automation_triggers_crudkit_instance(
             api_base_url,
+            project.clone(),
             project_view.id,
             Callback::new(move |context| set_trigger_context.set(Some(context))),
         );
@@ -1915,8 +1974,20 @@ fn projects_panel(api_base_url: String) -> impl IntoView + 'static {
 }
 
 fn projects_crudkit_instance(api_base_url: String) -> impl IntoView + 'static {
+    let (context, set_context) = signal(None::<CrudInstanceContext>);
+    reload_crudkit_on_live_event(context, |event| {
+        matches!(
+            event,
+            UiEvent::ProjectListChanged { .. } | UiEvent::ProjectChanged { .. }
+        )
+    });
+
     view! {
-        <CrudInstance name="projects" config=projects_crudkit_config(api_base_url) />
+        <CrudInstance
+            name="projects"
+            config=projects_crudkit_config(api_base_url)
+            on_context_created=Callback::new(move |context| set_context.set(Some(context)))
+        />
     }
 }
 
@@ -2209,22 +2280,40 @@ fn projects_crudkit_config(api_base_url: String) -> CrudInstanceConfig {
 }
 
 #[component]
-fn WorkItemsPanel(api_base_url: String, project_id: i64) -> impl IntoView + 'static {
+fn WorkItemsPanel(
+    api_base_url: String,
+    project: String,
+    project_id: i64,
+) -> impl IntoView + 'static {
     view! {
         <section class="work-items-admin panel">
             <div class="panel-heading">
                 <h2>"Work items"</h2>
             </div>
             <div class="crudkit-work-items" data-crudkit-leptos="work-items">
-                {work_items_crudkit_instance(api_base_url, project_id)}
+                {work_items_crudkit_instance(api_base_url, project, project_id)}
             </div>
         </section>
     }
 }
 
-fn work_items_crudkit_instance(api_base_url: String, project_id: i64) -> impl IntoView + 'static {
+fn work_items_crudkit_instance(
+    api_base_url: String,
+    project: String,
+    project_id: i64,
+) -> impl IntoView + 'static {
+    let (context, set_context) = signal(None::<CrudInstanceContext>);
+    reload_crudkit_on_live_event(context, move |event| {
+        event_scopes_named_project(event, Some(project.as_str()))
+            && matches!(event, UiEvent::WorkItemChanged { .. })
+    });
+
     view! {
-        <CrudInstance name="work-items" config=work_items_crudkit_config(api_base_url, project_id) />
+        <CrudInstance
+            name="work-items"
+            config=work_items_crudkit_config(api_base_url, project_id)
+            on_context_created=Callback::new(move |context| set_context.set(Some(context)))
+        />
     }
 }
 
@@ -2419,22 +2508,40 @@ fn work_item_model_handler(project_id: i64) -> ModelHandler {
 }
 
 #[component]
-fn SwimLanesPanel(api_base_url: String, project_id: i64) -> impl IntoView + 'static {
+fn SwimLanesPanel(
+    api_base_url: String,
+    project: String,
+    project_id: i64,
+) -> impl IntoView + 'static {
     view! {
         <section class="swim-lanes-admin panel">
             <div class="panel-heading">
                 <h2>"Swim-lanes"</h2>
             </div>
             <div class="crudkit-swim-lanes" data-crudkit-leptos="swim-lanes">
-                {swim_lanes_crudkit_instance(api_base_url, project_id)}
+                {swim_lanes_crudkit_instance(api_base_url, project, project_id)}
             </div>
         </section>
     }
 }
 
-fn swim_lanes_crudkit_instance(api_base_url: String, project_id: i64) -> impl IntoView + 'static {
+fn swim_lanes_crudkit_instance(
+    api_base_url: String,
+    project: String,
+    project_id: i64,
+) -> impl IntoView + 'static {
+    let (context, set_context) = signal(None::<CrudInstanceContext>);
+    reload_crudkit_on_live_event(context, move |event| {
+        event_scopes_named_project(event, Some(project.as_str()))
+            && matches!(event, UiEvent::SwimLaneChanged { .. })
+    });
+
     view! {
-        <CrudInstance name="swim-lanes" config=swim_lanes_crudkit_config(api_base_url, project_id) />
+        <CrudInstance
+            name="swim-lanes"
+            config=swim_lanes_crudkit_config(api_base_url, project_id)
+            on_context_created=Callback::new(move |context| set_context.set(Some(context)))
+        />
     }
 }
 
@@ -2574,8 +2681,20 @@ fn agent_tools_panel(api_base_url: String) -> impl IntoView + 'static {
 }
 
 fn agent_tools_crudkit_instance(api_base_url: String) -> impl IntoView + 'static {
+    let (context, set_context) = signal(None::<CrudInstanceContext>);
+    reload_crudkit_on_live_event(context, |event| {
+        matches!(
+            event,
+            UiEvent::AgentToolChanged { .. } | UiEvent::CodexStatusChanged { .. }
+        )
+    });
+
     view! {
-        <CrudInstance name="agent-tools" config=agent_tools_crudkit_config(api_base_url) />
+        <CrudInstance
+            name="agent-tools"
+            config=agent_tools_crudkit_config(api_base_url)
+            on_context_created=Callback::new(move |context| set_context.set(Some(context)))
+        />
     }
 }
 
@@ -2672,14 +2791,25 @@ fn agent_tools_crudkit_config(api_base_url: String) -> CrudInstanceConfig {
 
 fn automation_triggers_crudkit_instance(
     api_base_url: String,
+    project: String,
     project_id: i64,
     on_context_created: Callback<CrudInstanceContext>,
 ) -> impl IntoView + 'static {
+    let (context, set_context) = signal(None::<CrudInstanceContext>);
+    reload_crudkit_on_live_event(context, move |event| {
+        event_scopes_named_project(event, Some(project.as_str()))
+            && matches!(event, UiEvent::AutomationChanged { .. })
+    });
+    let created = Callback::new(move |context| {
+        set_context.set(Some(context));
+        on_context_created.run(context);
+    });
+
     view! {
         <CrudInstance
             name="automation-triggers"
             config=automation_triggers_crudkit_config(api_base_url, project_id)
-            on_context_created=on_context_created
+            on_context_created=created
         />
     }
 }
@@ -3528,6 +3658,100 @@ fn js_error_message(value: wasm_bindgen::JsValue) -> String {
         .unwrap_or_else(|| "Copy failed".to_owned())
 }
 
+#[component]
+fn LiveBoardItems(
+    project: String,
+    initial_items: Vec<WorkItemView>,
+    initial_swim_lanes: Vec<SwimLaneView>,
+    open_create_item: Callback<String>,
+) -> impl IntoView + 'static {
+    let (items, set_items) = signal(initial_items);
+    let (swim_lanes, set_swim_lanes) = signal(initial_swim_lanes);
+    let project_for_loader = project.clone();
+    let section = LocalResource::new(move || load_board_items_section(project_for_loader.clone()));
+    let project_for_events = project.clone();
+    refetch_on_live_event(section, move |event| {
+        event_scopes_named_project(event, Some(project_for_events.as_str()))
+            && matches!(
+                event,
+                UiEvent::WorkItemChanged { .. } | UiEvent::SwimLaneChanged { .. }
+            )
+    });
+
+    Effect::new(move |_| {
+        if let Some(Ok(section)) = section.get() {
+            set_items.set(section.items);
+            set_swim_lanes.set(section.swim_lanes);
+        }
+    });
+
+    view! {
+        {move || {
+            board_view(
+                project.clone(),
+                items.get(),
+                swim_lanes.get(),
+                open_create_item,
+            )
+        }}
+    }
+}
+
+#[component]
+fn LiveBoardAutomation(
+    project: String,
+    initial_status: AutomationStatusView,
+    initial_running: bool,
+    initial_run_sessions: Vec<BoardRunSessionView>,
+) -> impl IntoView + 'static {
+    let (automation_status, set_automation_status) = signal(initial_status);
+    let (automation_running, set_automation_running) = signal(initial_running);
+    let (run_sessions, set_run_sessions) = signal(initial_run_sessions);
+    let project_for_loader = project.clone();
+    let section =
+        LocalResource::new(move || load_board_automation_section(project_for_loader.clone()));
+    let project_for_events = project.clone();
+    refetch_on_live_event(section, move |event| {
+        event_scopes_named_project(event, Some(project_for_events.as_str()))
+            && matches!(
+                event,
+                UiEvent::AutomationChanged { .. }
+                    | UiEvent::AgentRunChanged { .. }
+                    | UiEvent::AgentOutputChanged { .. }
+                    | UiEvent::CodexStatusChanged { .. }
+            )
+    });
+
+    Effect::new(move |_| {
+        if let Some(Ok(section)) = section.get() {
+            set_automation_status.set(section.automation_status);
+            set_automation_running.set(section.automation_running);
+            set_run_sessions.set(section.run_sessions);
+        }
+    });
+
+    let status_note = Signal::derive(move || {
+        let status = automation_status.get();
+        let running_runs = status.running_runs;
+        let controller = if automation_running.get() {
+            "controller running"
+        } else {
+            "controller stopped"
+        };
+        Some(format!("{running_runs} running, {controller}"))
+    });
+
+    view! {
+        <RunSessionsPanel
+            project=project
+            title="Runs"
+            status_note=status_note
+            run_sessions=run_sessions
+            empty_message="No runs yet."
+        />
+    }
+}
+
 fn project_settings_view(
     project: &str,
     project_view: ProjectView,
@@ -3643,20 +3867,6 @@ fn memory_event_ref_label(event: &ProjectMemoryEventRefView) -> String {
     }
 }
 
-fn automation_view(
-    project: &str,
-    automation_status: AutomationStatusView,
-    run_sessions: Vec<BoardRunSessionView>,
-) -> impl IntoView + 'static {
-    run_sessions_panel(
-        project.to_owned(),
-        "Runs",
-        Some(format!("{} running", automation_status.running_runs)),
-        run_sessions,
-        "No runs yet.",
-    )
-}
-
 fn trigger_runs_panel(
     project: String,
     selected_trigger_id: Memo<Option<i64>>,
@@ -3679,18 +3889,37 @@ fn trigger_runs_panel(
     refetch_on_live_event(trigger_runs, move |event| {
         event_scopes_named_project(event, Some(project_for_events.as_str()))
             && matches!(
-                event.kind,
-                UiEventKind::AutomationChanged
-                    | UiEventKind::AgentRunChanged
-                    | UiEventKind::AgentOutputChanged
-                    | UiEventKind::CodexStatusChanged
+                event,
+                UiEvent::AutomationChanged { .. }
+                    | UiEvent::AgentRunChanged { .. }
+                    | UiEvent::AgentOutputChanged { .. }
+                    | UiEvent::CodexStatusChanged { .. }
             )
             && selected_trigger_id.get().is_some()
     });
+    let (run_sessions, set_run_sessions) = signal(Vec::<BoardRunSessionView>::new());
+    let (load_error, set_load_error) = signal(None::<String>);
+    Effect::new(move |_| {
+        if let Some(result) = trigger_runs.get() {
+            match result {
+                Ok(Some(sessions)) => {
+                    set_load_error.set(None);
+                    set_run_sessions.set(sessions);
+                }
+                Ok(None) => {
+                    set_load_error.set(None);
+                    set_run_sessions.set(Vec::new());
+                }
+                Err(err) => {
+                    set_load_error.set(Some(err.to_string()));
+                }
+            }
+        }
+    });
 
     view! {
-        {move || match trigger_runs.get() {
-            Some(Ok(Some(run_sessions))) => {
+        {move || {
+            if selected_trigger_id.get().is_some() {
                 let schedule_action = selected_trigger_id.get().map(|trigger_id| {
                     format!(
                         "/projects/{}/automation/triggers/{}/schedule-evaluation",
@@ -3698,6 +3927,7 @@ fn trigger_runs_panel(
                         trigger_id
                     )
                 });
+                let error = load_error.get();
                 view! {
                     {schedule_action.map(|action| {
                         view! {
@@ -3711,16 +3941,29 @@ fn trigger_runs_panel(
                             </section>
                         }
                     })}
-                    {run_sessions_panel(
-                        project_for_view.clone(),
-                        "Runs for selected automation",
-                        None,
-                        run_sessions,
-                        "No runs for this automation yet.",
-                    )}
+                    {if let Some(error) = error {
+                        view! {
+                            <section class="automation trigger-runs">
+                                <div class="panel-heading">
+                                    <h2>"Runs"</h2>
+                                </div>
+                                <p class="system-alert">{error}</p>
+                            </section>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <RunSessionsPanel
+                                project=project_for_view.clone()
+                                title="Runs for selected automation"
+                                status_note=Signal::derive(|| None::<String>)
+                                run_sessions=run_sessions
+                                empty_message="No runs for this automation yet."
+                            />
+                        }.into_any()
+                    }}
                 }.into_any()
-            },
-            Some(Ok(None)) => view! {
+            } else {
+                view! {
                 <section class="automation trigger-runs">
                     <div class="panel-heading">
                         <h2>"Runs"</h2>
@@ -3728,42 +3971,45 @@ fn trigger_runs_panel(
                     </div>
                     <p class="muted">"No automation selected."</p>
                 </section>
-            }.into_any(),
-            Some(Err(err)) => view! {
-                <section class="automation trigger-runs">
-                    <div class="panel-heading">
-                        <h2>"Runs"</h2>
-                    </div>
-                    <p class="system-alert">{err.to_string()}</p>
-                </section>
-            }.into_any(),
-            None => view! {
-                <section class="automation trigger-runs">
-                    <div class="panel-heading">
-                        <h2>"Runs"</h2>
-                    </div>
-                    <p class="muted">"Loading runs..."</p>
-                </section>
-            }.into_any(),
+                }.into_any()
+            }
         }}
     }
 }
 
-fn run_sessions_panel(
+#[component]
+fn RunSessionsPanel(
     project: String,
     title: &'static str,
-    status_note: Option<String>,
-    run_sessions: Vec<BoardRunSessionView>,
+    #[prop(into)] status_note: Signal<Option<String>>,
+    #[prop(into)] run_sessions: ReadSignal<Vec<BoardRunSessionView>>,
     empty_message: &'static str,
 ) -> impl IntoView + 'static {
-    let initial_run_id = run_sessions.first().map(|session| session.run.id);
-    let (selected_run_id, set_selected_run_id) = signal(initial_run_id);
-    let list_sessions = run_sessions.clone();
-    let detail_sessions = run_sessions.clone();
-    let run_items = if list_sessions.is_empty() {
-        view! { <p class="muted">{empty_message}</p> }.into_any()
-    } else {
-        let sessions = list_sessions
+    let (selected_run_id, set_selected_run_id) = signal(None::<i64>);
+    Effect::new(move |_| {
+        let sessions = run_sessions.get();
+        let selected = selected_run_id.get_untracked();
+        let selected_still_exists = selected
+            .map(|run_id| sessions.iter().any(|session| session.run.id == run_id))
+            .unwrap_or(false);
+        let next = if sessions.is_empty() {
+            None
+        } else if selected_still_exists {
+            selected
+        } else {
+            sessions.first().map(|session| session.run.id)
+        };
+        if selected != next {
+            set_selected_run_id.set(next);
+        }
+    });
+
+    let run_items = move || {
+        let sessions = run_sessions.get();
+        if sessions.is_empty() {
+            return view! { <p class="muted">{empty_message}</p> }.into_any();
+        }
+        let sessions = sessions
             .into_iter()
             .map(|session| {
                 let run_id = session.run.id;
@@ -3801,6 +4047,7 @@ fn run_sessions_panel(
     };
     let detail_project = project.clone();
     let run_detail = move || {
+        let detail_sessions = run_sessions.get();
         let selected = selected_run_id
             .get()
             .and_then(|run_id| {
@@ -3820,7 +4067,7 @@ fn run_sessions_panel(
         <section class="automation">
             <div class="panel-heading">
                 <h2>{title}</h2>
-                {status_note.clone().map(|note| view! { <p class="muted">{note}</p> })}
+                {move || status_note.get().map(|note| view! { <p class="muted">{note}</p> })}
             </div>
             <div class="run-session-shell">
                 {run_items}
@@ -4221,7 +4468,7 @@ fn agent_reasoning_options(selected: Option<AgentReasoningEffort>) -> Vec<impl I
 }
 
 fn board_view(
-    project: &str,
+    project: String,
     items: Vec<WorkItemView>,
     swim_lanes: Vec<SwimLaneView>,
     open_create_item: Callback<String>,
@@ -4236,7 +4483,7 @@ fn board_view(
                 .iter()
                 .filter(|item| item.state.as_deref() == Some(lane_identifier.as_str()))
                 .cloned()
-                .map(|item| item_card(project, item))
+                .map(|item| item_card(project.clone(), item))
                 .collect::<Vec<_>>();
             let count = cards.len();
             let create_state = lane_identifier.clone();
@@ -4260,7 +4507,7 @@ fn board_view(
         .collect::<Vec<_>>();
     let all_cards = all_items
         .into_iter()
-        .map(|item| item_card(project, item))
+        .map(|item| item_card(project.clone(), item))
         .collect::<Vec<_>>();
     let all_count = all_cards.len();
     view! {
@@ -4277,8 +4524,8 @@ fn board_view(
     }
 }
 
-fn item_card(project: &str, item: WorkItemView) -> impl IntoView + 'static {
-    let href = format!("/projects/{}/items/{}", encode_path(project), item.id);
+fn item_card(project: String, item: WorkItemView) -> impl IntoView + 'static {
+    let href = format!("/projects/{}/items/{}", encode_path(&project), item.id);
     let description = preview(&item.description);
     let claimed = item.claimed_by.is_some();
     let label_chips = item

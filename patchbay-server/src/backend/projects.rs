@@ -26,7 +26,7 @@ use crate::{
     shared::view_models::{
         AgentReasoningEffort, AgentToolName, CodexAgentModel, ProjectMemoryCompactionView,
         ProjectMemoryEventView, ProjectMemoryUpdateView, ProjectMemoryView, ProjectSettingsView,
-        ProjectView, UiEventKind, WorkspaceMode, WorktreeCleanupPolicy,
+        ProjectView, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -222,8 +222,8 @@ pub async fn create_project(store: &Store, create: CreateProject) -> Result<Proj
         .context("failed to commit project create")?;
 
     let view = ProjectView::from(project);
-    events::publish_global(UiEventKind::ProjectListChanged);
-    events::publish_project(UiEventKind::ProjectChanged, &view.name);
+    events::publish_project_list_changed();
+    events::publish_project_changed(&view.name);
     Ok(view)
 }
 
@@ -273,8 +273,8 @@ pub async fn update_project(
         .await
         .with_context(|| format!("failed to update project '{name}'"))?;
     let view = ProjectView::from(updated);
-    events::publish_global(UiEventKind::ProjectListChanged);
-    events::publish_project(UiEventKind::ProjectChanged, &view.name);
+    events::publish_project_list_changed();
+    events::publish_project_changed(&view.name);
     Ok(view)
 }
 
@@ -289,7 +289,7 @@ pub async fn update_system_prompt(store: &Store, name: &str, body: String) -> Re
         .await
         .with_context(|| format!("failed to update system prompt for project '{name}'"))?;
     let view = ProjectView::from(updated);
-    events::publish_project(UiEventKind::ProjectChanged, &view.name);
+    events::publish_project_changed(&view.name);
     Ok(view)
 }
 
@@ -375,7 +375,7 @@ pub async fn compact_memory_events(
         .exec(store.db().as_ref())
         .await
         .context("failed to compact project memory events")?;
-    events::publish_project(UiEventKind::MemoryChanged, project_name);
+    events::publish_memory_changed(project_name);
     Ok(ProjectMemoryCompactionView {
         project_id,
         project_name: project_name.to_owned(),
@@ -399,7 +399,7 @@ pub async fn snapshot_current_memory_event(
     let db = store.db();
     let event =
         record_memory_changed_event_in_tx(db.as_ref(), &project, operation, &source).await?;
-    events::publish_project(UiEventKind::MemoryChanged, project_name);
+    events::publish_memory_changed(project_name);
     Ok(memory_event_to_view(project_name, event))
 }
 
@@ -449,7 +449,7 @@ async fn change_memory(
     txn.commit()
         .await
         .context("failed to commit project memory update")?;
-    events::publish_project(UiEventKind::MemoryChanged, name);
+    events::publish_memory_changed(name);
 
     Ok(ProjectMemoryUpdateView {
         project: updated.clone().into(),
@@ -607,7 +607,7 @@ pub async fn update_settings(
         .await
         .with_context(|| format!("failed to update settings for project '{project_name}'"))?;
     let settings = project_settings_to_view(updated)?;
-    events::publish_project(UiEventKind::ProjectChanged, project_name);
+    events::publish_project_changed(project_name);
     Ok(settings)
 }
 
@@ -625,7 +625,7 @@ pub async fn delete_project(store: &Store, name: &str) -> Result<()> {
         .exec(store.db().as_ref())
         .await
         .with_context(|| format!("failed to delete project '{name}'"))?;
-    events::publish_global(UiEventKind::ProjectListChanged);
+    events::publish_project_list_changed();
     Ok(())
 }
 

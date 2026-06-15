@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::{
     backend::{events, storage::utc_now},
-    shared::view_models::{AgentRunOutputPiece, ProcessSessionView, UiEventKind},
+    shared::view_models::{AgentRunOutputPiece, ProcessSessionView},
 };
 
 #[cfg(test)]
@@ -42,7 +42,7 @@ impl ProcessSessionRegistry {
             updated_at: now,
         };
         self.sessions.lock().await.insert(session.run_id, session);
-        events::publish_run(UiEventKind::AgentRunChanged, &project_name, run_id, None);
+        events::publish_agent_run_changed(&project_name, run_id, None);
         cancel_rx
     }
 
@@ -56,19 +56,14 @@ impl ProcessSessionRegistry {
             None
         };
         if let Some(project_name) = project_name {
-            events::publish_run(UiEventKind::AgentOutputChanged, &project_name, run_id, None);
+            events::publish_agent_output_changed(&project_name, run_id, None);
         }
     }
 
     pub async fn finish(&self, run_id: i64) {
         let session = self.sessions.lock().await.remove(&run_id);
         if let Some(session) = session {
-            events::publish_run(
-                UiEventKind::AgentRunChanged,
-                &session.project_name,
-                run_id,
-                None,
-            );
+            events::publish_agent_run_changed(&session.project_name, run_id, None);
         }
     }
 

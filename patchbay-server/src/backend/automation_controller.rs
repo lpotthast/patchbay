@@ -6,10 +6,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{
-    backend::{events, process_sessions::ProcessSessionRegistry, projects, storage::Store},
-    shared::view_models::UiEventKind,
-};
+use crate::backend::{events, process_sessions::ProcessSessionRegistry, projects, storage::Store};
 
 #[derive(Clone, Debug, Default)]
 pub struct AutomationController {
@@ -48,7 +45,7 @@ impl AutomationController {
             shutdown_rx,
         ));
         projects.insert(project_name.clone(), ProjectAutomation { shutdown, handle });
-        events::publish_project(UiEventKind::AutomationChanged, &project_name);
+        events::publish_automation_changed(&project_name);
         Ok(())
     }
 
@@ -66,7 +63,7 @@ impl AutomationController {
                 .await
                 .context("project automation task failed")?;
         }
-        events::publish_project(UiEventKind::AutomationChanged, project_name);
+        events::publish_automation_changed(project_name);
         Ok(())
     }
 
@@ -83,7 +80,7 @@ impl AutomationController {
             }
         }
         for project_name in project_names {
-            events::publish_project(UiEventKind::AutomationChanged, &project_name);
+            events::publish_automation_changed(&project_name);
         }
     }
 

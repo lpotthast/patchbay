@@ -196,6 +196,7 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         find(driver, By::Css(".lane:first-child .lane-add")).await?;
         assert_source_does_not_contain(driver, "data-crudkit-leptos=\"automation-triggers\"")
             .await?;
+        assert_crudkit_create_form_survives_live_event(driver).await?;
 
         driver
             .goto(app.url("/automation?project=demo"))
@@ -458,6 +459,84 @@ async fn assert_memory_history_selector_behaviour(driver: &WebDriver) -> Result<
         .context("failed to verify memory history selector behaviour")?
         .convert::<String>()
         .context("failed to read memory history selector result")?;
+    assert_that!(result).is_equal_to("ok".to_owned());
+    Ok(())
+}
+
+async fn assert_crudkit_create_form_survives_live_event(driver: &WebDriver) -> Result<(), Report> {
+    click(
+        driver,
+        By::Css("[data-crudkit-leptos='work-items'] .crud-nav button"),
+    )
+    .await?;
+    find(
+        driver,
+        By::Css("[data-crudkit-leptos='work-items'] .crud-input-field"),
+    )
+    .await?;
+
+    let result = driver
+        .execute_async(
+            r#"
+            const done = arguments[0];
+            const editableField = () => {
+                const panel = document.querySelector("[data-crudkit-leptos='work-items']");
+                const field = panel?.querySelector(".crud-input-field");
+                if (!field) {
+                    return null;
+                }
+                if (field.matches('input, textarea')) {
+                    return field;
+                }
+                return field.querySelector('input, textarea');
+            };
+            const draftInput = editableField();
+            if (!draftInput) {
+                done('missing work-item create input');
+                return;
+            }
+            draftInput.value = 'Draft survives live event';
+            draftInput.dispatchEvent(new Event('keyup', { bubbles: true }));
+            draftInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+            fetch('/api/projects/demo/items', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: 'Live refresh item',
+                    description: 'Created to emit a websocket event',
+                    state: 'open',
+                    agent_model_override: null,
+                    agent_reasoning_effort_override: null
+                }),
+            }).then(async response => {
+                if (!response.ok) {
+                    done(await response.text());
+                    return;
+                }
+                const deadline = Date.now() + 5000;
+                const check = () => {
+                    const currentInput = editableField();
+                    const boardUpdated = document.body.textContent.includes('Live refresh item');
+                    if (currentInput?.value === 'Draft survives live event' && boardUpdated) {
+                        done('ok');
+                        return;
+                    }
+                    if (Date.now() > deadline) {
+                        done(`draft=${currentInput?.value ?? '<missing>'}; boardUpdated=${boardUpdated}`);
+                        return;
+                    }
+                    setTimeout(check, 100);
+                };
+                check();
+            }).catch(error => done(String(error)));
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to verify CrudKit create form survives live event")?
+        .convert::<String>()
+        .context("failed to read CrudKit live event result")?;
     assert_that!(result).is_equal_to("ok".to_owned());
     Ok(())
 }

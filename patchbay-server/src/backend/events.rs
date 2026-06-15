@@ -5,10 +5,7 @@ use std::sync::{
 
 use tokio::sync::broadcast;
 
-use crate::{
-    backend::storage::utc_now,
-    shared::view_models::{UiEvent, UiEventKind},
-};
+use crate::{backend::storage::utc_now, shared::view_models::UiEvent};
 
 const EVENT_BUFFER_SIZE: usize = 1024;
 
@@ -35,12 +32,7 @@ pub(crate) fn subscribe() -> broadcast::Receiver<UiEvent> {
     event_bus().sender.subscribe()
 }
 
-pub(crate) fn publish(
-    kind: UiEventKind,
-    project: Option<impl Into<String>>,
-    item_id: Option<i64>,
-    run_id: Option<i64>,
-) {
+fn publish(build: impl FnOnce(u64, String) -> UiEvent) {
     let Some(bus) = EVENT_BUS
         .read()
         .expect("Patchbay UI event bus lock is poisoned")
@@ -48,31 +40,108 @@ pub(crate) fn publish(
     else {
         return;
     };
-    let event = UiEvent {
-        sequence: bus.next_sequence.fetch_add(1, Ordering::Relaxed),
-        kind,
-        project: project.map(Into::into),
-        item_id,
-        run_id,
-        timestamp: utc_now(),
-    };
+    let sequence = bus.next_sequence.fetch_add(1, Ordering::Relaxed);
+    let event = build(sequence, utc_now());
     let _ = bus.sender.send(event);
 }
 
-pub(crate) fn publish_project(kind: UiEventKind, project: &str) {
-    publish(kind, Some(project), None, None);
+pub(crate) fn publish_project_list_changed() {
+    publish(|sequence, timestamp| UiEvent::ProjectListChanged {
+        sequence,
+        timestamp,
+    });
 }
 
-pub(crate) fn publish_item(kind: UiEventKind, project: &str, item_id: i64) {
-    publish(kind, Some(project), Some(item_id), None);
+pub(crate) fn publish_project_changed(project: &str) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::ProjectChanged {
+        sequence,
+        timestamp,
+        project,
+    });
 }
 
-pub(crate) fn publish_run(kind: UiEventKind, project: &str, run_id: i64, item_id: Option<i64>) {
-    publish(kind, Some(project), item_id, Some(run_id));
+pub(crate) fn publish_work_item_changed(project: &str, item_id: i64) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::WorkItemChanged {
+        sequence,
+        timestamp,
+        project,
+        item_id,
+    });
 }
 
-pub(crate) fn publish_global(kind: UiEventKind) {
-    publish(kind, None::<String>, None, None);
+pub(crate) fn publish_comment_changed(project: &str, item_id: i64) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::CommentChanged {
+        sequence,
+        timestamp,
+        project,
+        item_id,
+    });
+}
+
+pub(crate) fn publish_memory_changed(project: &str) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::MemoryChanged {
+        sequence,
+        timestamp,
+        project,
+    });
+}
+
+pub(crate) fn publish_swim_lane_changed(project: &str) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::SwimLaneChanged {
+        sequence,
+        timestamp,
+        project,
+    });
+}
+
+pub(crate) fn publish_agent_tool_changed() {
+    publish(|sequence, timestamp| UiEvent::AgentToolChanged {
+        sequence,
+        timestamp,
+    });
+}
+
+pub(crate) fn publish_automation_changed(project: &str) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::AutomationChanged {
+        sequence,
+        timestamp,
+        project,
+    });
+}
+
+pub(crate) fn publish_agent_run_changed(project: &str, run_id: i64, item_id: Option<i64>) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::AgentRunChanged {
+        sequence,
+        timestamp,
+        project,
+        run_id,
+        item_id,
+    });
+}
+
+pub(crate) fn publish_agent_output_changed(project: &str, run_id: i64, item_id: Option<i64>) {
+    let project = project.to_owned();
+    publish(|sequence, timestamp| UiEvent::AgentOutputChanged {
+        sequence,
+        timestamp,
+        project,
+        run_id,
+        item_id,
+    });
+}
+
+pub(crate) fn publish_codex_status_changed() {
+    publish(|sequence, timestamp| UiEvent::CodexStatusChanged {
+        sequence,
+        timestamp,
+    });
 }
 
 fn event_bus() -> Arc<UiEventBus> {

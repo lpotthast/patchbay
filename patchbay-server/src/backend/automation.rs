@@ -37,7 +37,7 @@ use crate::{
         AgentRunOutputPiece, AgentRunStatus, AgentRunView, AgentToolName, AutomationMode,
         AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL,
         FINISHED_STATE_LABEL, ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView,
-        RunLogView, UiEventKind, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
+        RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -1135,7 +1135,7 @@ async fn create_run(
     .insert(store.db().as_ref())
     .await
     .context("failed to create agent run")?;
-    publish_run_model_event(store, &run, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &run).await;
     Ok(run)
 }
 
@@ -1172,7 +1172,7 @@ async fn update_run_launch_details(
         .update(store.db().as_ref())
         .await
         .context("failed to update agent run launch details")?;
-    publish_run_model_event(store, &updated, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
 
@@ -1188,7 +1188,7 @@ async fn update_run_work_item_id(
         .update(store.db().as_ref())
         .await
         .context("failed to update agent run work item")?;
-    publish_run_model_event(store, &updated, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
 
@@ -1210,7 +1210,7 @@ async fn finish_run(
         .update(store.db().as_ref())
         .await
         .context("failed to finish agent run")?;
-    publish_run_model_event(store, &updated, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
 
@@ -1226,14 +1226,14 @@ async fn update_run_process_id(
         .update(store.db().as_ref())
         .await
         .context("failed to update agent run process id")?;
-    publish_run_model_event(store, &updated, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
 
-async fn publish_run_model_event(store: &Store, run: &AgentRunModel, kind: UiEventKind) {
+async fn publish_run_model_event(store: &Store, run: &AgentRunModel) {
     match projects::project_name_by_id(store, run.project_id).await {
         Ok(project_name) => {
-            events::publish_run(kind, &project_name, run.id, run.work_item_id);
+            events::publish_agent_run_changed(&project_name, run.id, run.work_item_id);
         }
         Err(err) => {
             eprintln!("failed to resolve project for agent run UI event: {err:#}");
@@ -1648,7 +1648,7 @@ async fn update_run_pr_url(
         .update(store.db().as_ref())
         .await
         .context("failed to update run PR URL")?;
-    publish_run_model_event(store, &updated, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
 
@@ -1688,7 +1688,7 @@ async fn update_run_cleanup(
         .update(store.db().as_ref())
         .await
         .context("failed to update worktree cleanup status")?;
-    publish_run_model_event(store, &updated, UiEventKind::AgentRunChanged).await;
+    publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
 

@@ -6,29 +6,66 @@ use crudkit_core::condition::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UiEvent {
-    pub sequence: u64,
-    pub kind: UiEventKind,
-    pub project: Option<String>,
-    pub item_id: Option<i64>,
-    pub run_id: Option<i64>,
-    pub timestamp: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UiEventKind {
-    ProjectListChanged,
-    ProjectChanged,
-    WorkItemChanged,
-    CommentChanged,
-    MemoryChanged,
-    SwimLaneChanged,
-    AgentToolChanged,
-    AutomationChanged,
-    AgentRunChanged,
-    AgentOutputChanged,
-    CodexStatusChanged,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UiEvent {
+    ProjectListChanged {
+        sequence: u64,
+        timestamp: String,
+    },
+    ProjectChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+    },
+    WorkItemChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+        item_id: i64,
+    },
+    CommentChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+        item_id: i64,
+    },
+    MemoryChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+    },
+    SwimLaneChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+    },
+    AgentToolChanged {
+        sequence: u64,
+        timestamp: String,
+    },
+    AutomationChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+    },
+    AgentRunChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+        run_id: i64,
+        item_id: Option<i64>,
+    },
+    AgentOutputChanged {
+        sequence: u64,
+        timestamp: String,
+        project: String,
+        run_id: i64,
+        item_id: Option<i64>,
+    },
+    CodexStatusChanged {
+        sequence: u64,
+        timestamp: String,
+    },
 }
 
 #[derive(Debug, Clone)]

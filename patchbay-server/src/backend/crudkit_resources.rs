@@ -22,7 +22,7 @@ use crate::{
     },
     shared::view_models::{
         AgentReasoningEffort, AgentToolName, AutomationActivation, AutomationEffect,
-        DEFAULT_STATE_LABEL, STATE_LABEL_KEY, UiEventKind, WorkspaceMode, WorktreeCleanupPolicy,
+        DEFAULT_STATE_LABEL, STATE_LABEL_KEY, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -161,8 +161,8 @@ impl CrudLifetime<CrudProjectResource> for ProjectLifetime {
             .map_err(|err| ProjectHookError(err.to_string()))
             .map_err(HookError::Internal)?;
         }
-        events::publish_global(UiEventKind::ProjectListChanged);
-        events::publish_project(UiEventKind::ProjectChanged, &model.name);
+        events::publish_project_list_changed();
+        events::publish_project_changed(&model.name);
         Ok(data)
     }
 
@@ -243,8 +243,8 @@ impl CrudLifetime<CrudProjectResource> for ProjectLifetime {
             .map_err(|err| ProjectHookError(err.to_string()))
             .map_err(HookError::Internal)?;
         }
-        events::publish_global(UiEventKind::ProjectListChanged);
-        events::publish_project(UiEventKind::ProjectChanged, &model.name);
+        events::publish_project_list_changed();
+        events::publish_project_changed(&model.name);
         Ok(data)
     }
 
@@ -265,8 +265,8 @@ impl CrudLifetime<CrudProjectResource> for ProjectLifetime {
         _request: RequestContext<NoAuth>,
         data: ProjectHookData,
     ) -> Result<ProjectHookData, HookError<Self::Error>> {
-        events::publish_global(UiEventKind::ProjectListChanged);
-        events::publish_project(UiEventKind::ProjectChanged, &model.name);
+        events::publish_project_list_changed();
+        events::publish_project_changed(&model.name);
         Ok(data)
     }
 }
@@ -450,13 +450,7 @@ impl CrudLifetime<CrudWorkItemResource> for WorkItemLifetime {
         )
         .await
         .map_err(work_item_internal_error)?;
-        publish_work_item_crud_event(
-            &context.store,
-            model.project_id,
-            model.id,
-            UiEventKind::WorkItemChanged,
-        )
-        .await;
+        publish_work_item_crud_event(&context.store, model.project_id, model.id).await;
         Ok(data)
     }
 
@@ -493,13 +487,7 @@ impl CrudLifetime<CrudWorkItemResource> for WorkItemLifetime {
         _request: RequestContext<NoAuth>,
         data: (),
     ) -> Result<(), HookError<Self::Error>> {
-        publish_work_item_crud_event(
-            &context.store,
-            model.project_id,
-            model.id,
-            UiEventKind::WorkItemChanged,
-        )
-        .await;
+        publish_work_item_crud_event(&context.store, model.project_id, model.id).await;
         Ok(data)
     }
 
@@ -520,25 +508,14 @@ impl CrudLifetime<CrudWorkItemResource> for WorkItemLifetime {
         _request: RequestContext<NoAuth>,
         data: (),
     ) -> Result<(), HookError<Self::Error>> {
-        publish_work_item_crud_event(
-            &context.store,
-            model.project_id,
-            model.id,
-            UiEventKind::WorkItemChanged,
-        )
-        .await;
+        publish_work_item_crud_event(&context.store, model.project_id, model.id).await;
         Ok(data)
     }
 }
 
-async fn publish_work_item_crud_event(
-    store: &Store,
-    project_id: i64,
-    item_id: i64,
-    kind: UiEventKind,
-) {
+async fn publish_work_item_crud_event(store: &Store, project_id: i64, item_id: i64) {
     match projects::project_name_by_id(store, project_id).await {
-        Ok(project_name) => events::publish_item(kind, &project_name, item_id),
+        Ok(project_name) => events::publish_work_item_changed(&project_name, item_id),
         Err(err) => {
             eprintln!("failed to resolve project for work item UI event: {err:#}");
         }
@@ -894,12 +871,7 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         data: AutomationTriggerHookData,
     ) -> Result<AutomationTriggerHookData, HookError<Self::Error>> {
         apply_trigger_hook_data(context, model, data.clone()).await?;
-        publish_project_id_event(
-            &context.store,
-            model.project_id,
-            UiEventKind::AutomationChanged,
-        )
-        .await;
+        publish_automation_project_event(&context.store, model.project_id).await;
         Ok(data)
     }
 
@@ -955,12 +927,7 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         data: AutomationTriggerHookData,
     ) -> Result<AutomationTriggerHookData, HookError<Self::Error>> {
         apply_trigger_hook_data(context, model, data.clone()).await?;
-        publish_project_id_event(
-            &context.store,
-            model.project_id,
-            UiEventKind::AutomationChanged,
-        )
-        .await;
+        publish_automation_project_event(&context.store, model.project_id).await;
         Ok(data)
     }
 
@@ -981,12 +948,7 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         _request: RequestContext<NoAuth>,
         data: AutomationTriggerHookData,
     ) -> Result<AutomationTriggerHookData, HookError<Self::Error>> {
-        publish_project_id_event(
-            &context.store,
-            model.project_id,
-            UiEventKind::AutomationChanged,
-        )
-        .await;
+        publish_automation_project_event(&context.store, model.project_id).await;
         Ok(data)
     }
 }
@@ -1016,9 +978,18 @@ fn normalize_required_schedule(
     Ok(trimmed.to_owned())
 }
 
-async fn publish_project_id_event(store: &Store, project_id: i64, kind: UiEventKind) {
+async fn publish_automation_project_event(store: &Store, project_id: i64) {
     match projects::project_name_by_id(store, project_id).await {
-        Ok(project_name) => events::publish_project(kind, &project_name),
+        Ok(project_name) => events::publish_automation_changed(&project_name),
+        Err(err) => {
+            eprintln!("failed to resolve project for UI event: {err:#}");
+        }
+    }
+}
+
+async fn publish_swim_lane_project_event(store: &Store, project_id: i64) {
+    match projects::project_name_by_id(store, project_id).await {
+        Ok(project_name) => events::publish_swim_lane_changed(&project_name),
         Err(err) => {
             eprintln!("failed to resolve project for UI event: {err:#}");
         }
@@ -1291,12 +1262,7 @@ impl CrudLifetime<CrudSwimLaneResource> for SwimLaneLifetime {
         _request: RequestContext<NoAuth>,
         data: (),
     ) -> Result<(), HookError<Self::Error>> {
-        publish_project_id_event(
-            &context.store,
-            model.project_id,
-            UiEventKind::SwimLaneChanged,
-        )
-        .await;
+        publish_swim_lane_project_event(&context.store, model.project_id).await;
         Ok(data)
     }
 
@@ -1323,12 +1289,7 @@ impl CrudLifetime<CrudSwimLaneResource> for SwimLaneLifetime {
         _request: RequestContext<NoAuth>,
         data: (),
     ) -> Result<(), HookError<Self::Error>> {
-        publish_project_id_event(
-            &context.store,
-            model.project_id,
-            UiEventKind::SwimLaneChanged,
-        )
-        .await;
+        publish_swim_lane_project_event(&context.store, model.project_id).await;
         Ok(data)
     }
 
@@ -1349,12 +1310,7 @@ impl CrudLifetime<CrudSwimLaneResource> for SwimLaneLifetime {
         _request: RequestContext<NoAuth>,
         data: (),
     ) -> Result<(), HookError<Self::Error>> {
-        publish_project_id_event(
-            &context.store,
-            model.project_id,
-            UiEventKind::SwimLaneChanged,
-        )
-        .await;
+        publish_swim_lane_project_event(&context.store, model.project_id).await;
         Ok(data)
     }
 }

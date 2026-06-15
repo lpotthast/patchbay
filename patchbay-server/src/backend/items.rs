@@ -25,7 +25,7 @@ use crate::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentReasoningEffort, AuthorType,
         CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL, CommentView, DEFAULT_STATE_LABEL,
         DeleteWorkItemLabelResponse, FINISHED_STATE_LABEL, ProjectLabelView, RecoveredClaimView,
-        STATE_LABEL_KEY, UiEventKind, WorkItemEventView, WorkItemLabelView, WorkItemView,
+        STATE_LABEL_KEY, WorkItemEventView, WorkItemLabelView, WorkItemView,
     },
 };
 
@@ -179,7 +179,7 @@ pub async fn create_item(
     )
     .await?;
     txn.commit().await.context("failed to commit item create")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item.id);
+    events::publish_work_item_changed(project_name, item.id);
 
     model_to_view(store, item).await
 }
@@ -240,7 +240,7 @@ pub async fn update_item(
     )
     .await?;
     txn.commit().await.context("failed to commit item update")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
 
     model_to_view(store, updated).await
 }
@@ -282,7 +282,7 @@ pub async fn move_item(
     let event_body = format!("Moved item to {state}");
     record_event_in_tx(&txn, project_id, Some(item_id), "item_moved", &event_body).await?;
     txn.commit().await.context("failed to commit item move")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
 
     model_to_view(store, updated).await
 }
@@ -390,7 +390,7 @@ pub async fn claim_item(
     .await?;
     let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
     txn.commit().await.context("failed to commit item claim")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
 
     Ok(Some(model_to_view(store, item).await?))
 }
@@ -498,7 +498,7 @@ pub async fn claim_item_matching_condition(
         .await?;
         let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
         txn.commit().await.context("failed to commit item claim")?;
-        events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+        events::publish_work_item_changed(project_name, item_id);
 
         return Ok(Some(model_to_view(store, item).await?));
     }
@@ -606,7 +606,7 @@ pub async fn claim_specific_item(
     txn.commit()
         .await
         .context("failed to commit specific item claim")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
 
     Ok(Some(model_to_view(store, item).await?))
 }
@@ -687,7 +687,7 @@ pub async fn release_item(
     txn.commit()
         .await
         .context("failed to commit item release")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
 
     model_to_view(store, updated).await
 }
@@ -733,7 +733,7 @@ pub async fn progress_item(
     txn.commit()
         .await
         .context("failed to commit item progress")?;
-    events::publish_item(UiEventKind::CommentChanged, project_name, item_id);
+    events::publish_comment_changed(project_name, item_id);
 
     comment_to_view(comment)
 }
@@ -793,7 +793,7 @@ pub async fn finish_item(
     delete_label_by_key_in_tx(&txn, project_id, item_id, AUTOMATION_BLOCKED_LABEL_KEY).await?;
     record_event_in_tx(&txn, project_id, Some(item_id), "item_finished", report).await?;
     txn.commit().await.context("failed to commit item finish")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
 
     model_to_view(store, updated).await
 }
@@ -820,7 +820,7 @@ pub async fn delete_item(store: &Store, project_name: &str, item_id: i64) -> Res
         .await
         .context("failed to delete work item")?;
     txn.commit().await.context("failed to commit item delete")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
     Ok(())
 }
 
@@ -909,7 +909,7 @@ pub async fn add_label(
     let body = format!("Added label {}", format_label(&key, value.as_deref()));
     record_event_in_tx(&txn, project_id, Some(item_id), "label_added", &body).await?;
     txn.commit().await.context("failed to commit label add")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
     model_to_view(store, updated).await
 }
 
@@ -970,7 +970,7 @@ pub async fn update_label(
     txn.commit()
         .await
         .context("failed to commit label update")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
     model_to_view(store, updated).await
 }
 
@@ -1006,7 +1006,7 @@ pub async fn delete_label(
     txn.commit()
         .await
         .context("failed to commit label delete")?;
-    events::publish_item(UiEventKind::WorkItemChanged, project_name, item_id);
+    events::publish_work_item_changed(project_name, item_id);
     let work_item = model_to_view(store, updated).await?;
     Ok(DeleteWorkItemLabelResponse {
         deleted: true,

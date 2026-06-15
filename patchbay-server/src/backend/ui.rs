@@ -47,13 +47,14 @@ use crate::{
         workspace::{self, WorkspaceOpenTarget},
     },
     frontend::{
-        self, ApiDocsPage, BoardPage, BoardRunSessionView, CodexStatusPage, ItemPage, ProjectsPage,
-        RunLogPage, RuntimeConfigView, TriggersPage,
+        self, ApiDocsPage, BoardAutomationSection, BoardItemsSection, BoardPage,
+        BoardRunSessionView, CodexStatusPage, ItemPage, ProjectsPage, RunLogPage,
+        RuntimeConfigView, TriggersPage,
     },
     shared::view_models::{
         AgentReasoningEffort, AgentToolName, AuthorType, AutomationActivation, AutomationEffect,
         AutomationMode, CodexAppServerStatusView, DEFAULT_STATE_LABEL, ProcessSessionView,
-        UiEventKind, WorkspaceMode, WorktreeCleanupPolicy,
+        WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -905,7 +906,7 @@ async fn start_automation(
         let usable = status.usable;
         let message = status.message.clone();
         *state.codex_status.write().await = status;
-        events::publish_global(UiEventKind::CodexStatusChanged);
+        events::publish_codex_status_changed();
         if !usable {
             return error_response(anyhow::anyhow!(message)).await;
         }
@@ -1155,8 +1156,8 @@ async fn discover_agent_tools(
         Ok(_) => {
             let status = codex_app_server::app_server_status(&state.store).await;
             *state.codex_status.write().await = status;
-            events::publish_global(UiEventKind::AgentToolChanged);
-            events::publish_global(UiEventKind::CodexStatusChanged);
+            events::publish_agent_tool_changed();
+            events::publish_codex_status_changed();
             let target = codex_return_target(form.return_to, form.project);
             Redirect::to(&target).into_response()
         }
@@ -1171,7 +1172,7 @@ async fn logout_codex(
     match codex_app_server::logout_current_account(&state.store).await {
         Ok(status) => {
             *state.codex_status.write().await = status;
-            events::publish_global(UiEventKind::CodexStatusChanged);
+            events::publish_codex_status_changed();
             let target = codex_return_target(form.return_to, form.project);
             Redirect::to(&target).into_response()
         }
@@ -1606,6 +1607,37 @@ pub(crate) async fn board_page_data(
         api_base_url,
         codex_status,
         runtime: runtime_config_view(store),
+    })
+}
+
+pub(crate) async fn board_items_section(store: &Store, project: &str) -> Result<BoardItemsSection> {
+    Ok(BoardItemsSection {
+        items: items::list_items(store, project, None).await?,
+        swim_lanes: swim_lanes::list_swim_lanes(store, project).await?,
+    })
+}
+
+pub(crate) async fn board_automation_section(
+    store: &Store,
+    sessions: &ProcessSessionRegistry,
+    automation_controller: &AutomationController,
+    project: &str,
+) -> Result<BoardAutomationSection> {
+    let automation_status = automation::automation_status(store, project).await?;
+    let automation_running = automation_controller.is_project_running(project).await;
+    let active_sessions = sessions.list_for_project(project).await;
+    let run_sessions = board_run_sessions(
+        store,
+        project,
+        automation_status.recent_runs.clone(),
+        active_sessions,
+    )
+    .await?;
+
+    Ok(BoardAutomationSection {
+        automation_status,
+        automation_running,
+        run_sessions,
     })
 }
 

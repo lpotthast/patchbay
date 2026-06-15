@@ -27,8 +27,7 @@ use crate::{
     },
     shared::view_models::{
         AgentToolName, AutomationActivation, AutomationEffect, AutomationMode,
-        AutomationTriggerView, TriggerRunOutcome, UiEventKind,
-        default_automation_work_item_selector,
+        AutomationTriggerView, TriggerRunOutcome, default_automation_work_item_selector,
     },
 };
 
@@ -146,7 +145,7 @@ pub async fn create_trigger(
     .await
     .context("failed to create automation trigger")?;
 
-    events::publish_project(UiEventKind::AutomationChanged, project_name);
+    events::publish_automation_changed(project_name);
     model_to_view(trigger)
 }
 
@@ -162,7 +161,7 @@ pub async fn delete_trigger(store: &Store, project_name: &str, trigger_id: i64) 
         .exec(store.db().as_ref())
         .await
         .context("failed to delete automation trigger")?;
-    events::publish_project(UiEventKind::AutomationChanged, project_name);
+    events::publish_automation_changed(project_name);
     Ok(())
 }
 
@@ -237,7 +236,7 @@ pub async fn update_trigger(
         .update(store.db().as_ref())
         .await
         .context("failed to update automation trigger")?;
-    events::publish_project(UiEventKind::AutomationChanged, project_name);
+    events::publish_automation_changed(project_name);
     model_to_view(trigger)
 }
 
@@ -369,7 +368,7 @@ pub async fn schedule_trigger_evaluation(
         .update(store.db().as_ref())
         .await
         .context("failed to queue automation evaluation")?;
-    events::publish_project(UiEventKind::AutomationChanged, project_name);
+    events::publish_automation_changed(project_name);
     model_to_view(updated)
 }
 
@@ -769,7 +768,7 @@ async fn update_trigger_after_evaluation(
         .update(store.db().as_ref())
         .await
         .context("failed to update automation trigger after evaluation")?;
-    publish_project_id_event(store, updated.project_id, UiEventKind::AutomationChanged).await;
+    publish_project_id_event(store, updated.project_id).await;
     Ok(updated)
 }
 
@@ -800,7 +799,7 @@ async fn update_trigger_after_check(
         .update(store.db().as_ref())
         .await
         .context("failed to update automation trigger after check")?;
-    publish_project_id_event(store, updated.project_id, UiEventKind::AutomationChanged).await;
+    publish_project_id_event(store, updated.project_id).await;
     Ok(updated)
 }
 
@@ -816,13 +815,13 @@ async fn update_trigger_event_cursor(
         .update(store.db().as_ref())
         .await
         .context("failed to update automation trigger event cursor")?;
-    publish_project_id_event(store, updated.project_id, UiEventKind::AutomationChanged).await;
+    publish_project_id_event(store, updated.project_id).await;
     Ok(updated)
 }
 
-async fn publish_project_id_event(store: &Store, project_id: i64, kind: UiEventKind) {
+async fn publish_project_id_event(store: &Store, project_id: i64) {
     match projects::project_name_by_id(store, project_id).await {
-        Ok(project_name) => events::publish_project(kind, &project_name),
+        Ok(project_name) => events::publish_automation_changed(&project_name),
         Err(err) => {
             eprintln!("failed to resolve project for automation trigger UI event: {err:#}");
         }

@@ -15,7 +15,7 @@ use crate::{
         events, items, projects,
         storage::{Store, utc_now},
     },
-    shared::view_models::{AuthorType, CommentView, UiEventKind},
+    shared::view_models::{AuthorType, CommentView},
 };
 
 #[derive(Clone, Debug)]
@@ -71,7 +71,7 @@ pub async fn add_comment(
     )
     .await?;
     txn.commit().await.context("failed to commit comment add")?;
-    events::publish_item(UiEventKind::CommentChanged, project_name, item_id);
+    events::publish_comment_changed(project_name, item_id);
 
     model_to_view(comment)
 }

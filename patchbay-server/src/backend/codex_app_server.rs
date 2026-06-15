@@ -16,7 +16,7 @@ use crate::{
     },
     shared::view_models::{
         AgentToolName, CodexAppServerStatusView, CodexAuthSetupView, CodexPreconditionView,
-        CodexRateLimitView, CodexUsageSummaryView, UiEventKind,
+        CodexRateLimitView, CodexUsageSummaryView,
     },
 };
 
@@ -78,7 +78,7 @@ pub fn spawn_status_refresher_until(
                     }
                     let refreshed = app_server_status(&store).await;
                     *status.write().await = refreshed;
-                    events::publish_global(UiEventKind::CodexStatusChanged);
+                    events::publish_codex_status_changed();
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
