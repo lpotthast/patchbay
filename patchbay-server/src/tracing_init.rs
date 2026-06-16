@@ -7,7 +7,7 @@ use tracing_subscriber::{
 };
 
 type BoxedLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
-type StderrWriter = fn() -> std::io::Stderr;
+type StdoutWriter = fn() -> std::io::Stdout;
 
 const PATCHBAY_LOG_ENV: &str = "PATCHBAY_LOG";
 const PATCHBAY_SQLX_LOG_ENV: &str = "PATCHBAY_SQLX_LOG";
@@ -48,9 +48,9 @@ impl Default for TracingConfig {
 impl TracingConfig {
     fn into_fmt_layer(
         self,
-    ) -> tracing_subscriber::fmt::Layer<Registry, DefaultFields, Format<Full>, StderrWriter> {
+    ) -> tracing_subscriber::fmt::Layer<Registry, DefaultFields, Format<Full>, StdoutWriter> {
         tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr as StderrWriter)
+            .with_writer(std::io::stdout as StdoutWriter)
             .with_target(self.with_target)
             .with_file(self.with_file)
             .with_line_number(self.with_line_number)

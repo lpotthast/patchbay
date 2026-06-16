@@ -70,7 +70,6 @@ pub enum MemoryChangeSource {
         agent_run_id: Option<i64>,
     },
     User,
-    ServerCli,
     System,
 }
 
@@ -85,7 +84,6 @@ impl MemoryChangeSource {
         match self {
             Self::Agent { .. } => "agent",
             Self::User => "user",
-            Self::ServerCli => "server_cli",
             Self::System => "system",
         }
     }
@@ -93,7 +91,7 @@ impl MemoryChangeSource {
     fn actor_id(&self) -> Option<&str> {
         match self {
             Self::Agent { agent_id, .. } => Some(agent_id.as_str()),
-            Self::User | Self::ServerCli | Self::System => None,
+            Self::User | Self::System => None,
         }
     }
 
@@ -103,7 +101,7 @@ impl MemoryChangeSource {
                 agent_id,
                 agent_run_id,
             } => agent_run_id.or_else(|| infer_agent_run_id(agent_id)),
-            Self::User | Self::ServerCli | Self::System => None,
+            Self::User | Self::System => None,
         }
     }
 }
@@ -298,22 +296,6 @@ pub async fn update_system_prompt(store: &Store, name: &str, body: String) -> Re
     let view = ProjectView::from(updated);
     events::publish_project_changed(&view.name);
     Ok(view)
-}
-
-pub async fn update_memory(store: &Store, name: &str, body: String) -> Result<ProjectView> {
-    Ok(
-        update_memory_with_source(store, name, body, MemoryChangeSource::ServerCli)
-            .await?
-            .project,
-    )
-}
-
-pub async fn append_memory(store: &Store, name: &str, body: String) -> Result<ProjectView> {
-    Ok(
-        append_memory_with_source(store, name, body, MemoryChangeSource::ServerCli)
-            .await?
-            .project,
-    )
 }
 
 pub async fn update_memory_with_source(
@@ -1018,9 +1000,15 @@ mod tests {
         let prompted = update_system_prompt(&store, "demo", "User-controlled prompt".to_owned())
             .await
             .unwrap();
-        let remembered = append_memory(&store, "demo", "Shared project memory".to_owned())
-            .await
-            .unwrap();
+        let remembered = append_memory_with_source(
+            &store,
+            "demo",
+            "Shared project memory".to_owned(),
+            MemoryChangeSource::User,
+        )
+        .await
+        .unwrap()
+        .project;
 
         assert_eq!(prompted.system_prompt, "User-controlled prompt");
         assert_eq!(remembered.memory, "Shared project memory");

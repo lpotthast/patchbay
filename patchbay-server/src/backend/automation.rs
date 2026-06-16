@@ -262,23 +262,6 @@ fn ensure_patchbay_cli_path(path: PathBuf) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub async fn start_automation(
-    store: &Store,
-    project_name: &str,
-    start: StartAutomation,
-) -> Result<AgentRunView> {
-    start_automation_with_sessions(store, project_name, start, None).await
-}
-
-pub async fn start_automation_with_sessions(
-    store: &Store,
-    project_name: &str,
-    start: StartAutomation,
-    sessions: Option<ProcessSessionRegistry>,
-) -> Result<AgentRunView> {
-    start_automation_with_sessions_until(store, project_name, start, sessions, None).await
-}
-
 pub async fn start_automation_with_sessions_until(
     store: &Store,
     project_name: &str,

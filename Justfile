@@ -31,13 +31,13 @@ test:
     cargo test --manifest-path "{{types_manifest}}"
 
 browser-test:
-    cargo test --manifest-path "{{server_manifest}}" --test browser_test -- --ignored --nocapture
+    cargo test --manifest-path "{{server_manifest}}" --test browser_test -- --nocapture
 
 browser-test-visible:
-    BROWSER_TEST_VISIBLE=1 cargo test --manifest-path "{{server_manifest}}" --test browser_test -- --ignored --nocapture
+    BROWSER_TEST_VISIBLE=1 cargo test --manifest-path "{{server_manifest}}" --test browser_test -- --nocapture
 
 browser-test-pause:
-    BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 cargo test --manifest-path "{{server_manifest}}" --test browser_test -- --ignored --nocapture
+    BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 cargo test --manifest-path "{{server_manifest}}" --test browser_test -- --nocapture
 
 clippy:
     cargo clippy --manifest-path "{{server_manifest}}" --all-targets -- -D warnings
@@ -56,10 +56,10 @@ cli *args:
     cargo run -q --manifest-path "{{cli_manifest}}" -- {{args}}
 
 serve:
-    PATCHBAY_CLI_PATH="{{patchbay_cli_path}}" cargo leptos --manifest-path "{{server_manifest}}" serve -- --database "{{database}}" serve --bind "{{bind}}"
+    PATCHBAY_CLI_PATH="{{patchbay_cli_path}}" cargo leptos --manifest-path "{{server_manifest}}" serve -- --database "{{database}}" --bind "{{bind}}"
 
 serve-release:
-    PATCHBAY_CLI_PATH="{{patchbay_cli_path}}" cargo leptos --manifest-path "{{server_manifest}}" serve --release -- --database "{{database}}" serve --bind "{{bind}}"
+    PATCHBAY_CLI_PATH="{{patchbay_cli_path}}" cargo leptos --manifest-path "{{server_manifest}}" serve --release -- --database "{{database}}" --bind "{{bind}}"
 
 fresh-db:
     rm -f "{{database}}"

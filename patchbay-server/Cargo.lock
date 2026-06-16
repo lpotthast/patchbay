@@ -2893,9 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "leptos-browser-test"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f79ec50e1e2910852177e347ac7317284a94f13dd0d1b97fbb43d9c36e3bbe1"
+version = "0.2.1"
 dependencies = [
  "rootcause 0.12.1",
  "thiserror 2.0.18",

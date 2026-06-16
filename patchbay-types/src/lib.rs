@@ -532,6 +532,7 @@ pub struct SwimLaneView {
     pub identifier: String,
     pub name: String,
     pub position: i64,
+    pub can_create_items: bool,
     pub created_at: String,
     pub updated_at: String,
 }

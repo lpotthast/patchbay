@@ -43,6 +43,8 @@ pub struct Model {
 
     pub position: i64,
 
+    pub can_create_items: bool,
+
     #[ck_create_model(exclude)]
     #[ck_update_model(exclude)]
     pub created_at: String,

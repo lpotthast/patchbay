@@ -65,6 +65,7 @@ pub struct UpdateAutomationTrigger {
     pub priority: Option<i64>,
 }
 
+#[cfg(test)]
 pub async fn list_triggers(
     store: &Store,
     project_name: &str,
@@ -240,10 +241,12 @@ pub async fn update_trigger(
     model_to_view(trigger)
 }
 
+#[cfg(test)]
 pub async fn run_due_triggers(store: &Store) -> Result<Vec<TriggerRunOutcome>> {
     run_due_triggers_with_sessions(store, None).await
 }
 
+#[cfg(test)]
 pub async fn run_due_triggers_with_sessions(
     store: &Store,
     sessions: Option<ProcessSessionRegistry>,
@@ -680,12 +683,14 @@ async fn trigger_has_consumable_work(
     if !automation.mode.claims_work() {
         return Ok(false);
     }
-    if let Some(work_item_id) = work_item_id {
-        let item = items::get_item(store, project_name, work_item_id).await?;
-        return Ok(item.claimed_by.is_none() && item.finished_at.is_none());
-    }
     let Some(selector) = automation.work_item_selector.as_ref() else {
         return Ok(false);
+    };
+    if let Some(work_item_id) = work_item_id {
+        let item = items::get_item(store, project_name, work_item_id).await?;
+        return Ok(item.claimed_by.is_none()
+            && item.finished_at.is_none()
+            && items::item_matches_condition(store, project_name, work_item_id, selector).await?);
     };
     items::has_unclaimed_item_matching_condition(store, project_name, selector).await
 }
@@ -929,7 +934,7 @@ pub(crate) fn validate_trigger_configuration(
     if !mode.claims_work() {
         bail!("work-consuming automation must use execute or refine mode");
     }
-    if activation != AutomationActivation::WorkItemCreated && work_item_selector.is_none() {
+    if work_item_selector.is_none() {
         bail!("work-consuming automation requires a work item selector");
     }
     Ok(())
@@ -1270,7 +1275,7 @@ mod tests {
                 mode: None,
                 tool_name: None,
                 prompt: "Refine this new work item.".to_owned(),
-                work_item_selector: None,
+                work_item_selector: Some(default_work_item_selector()),
                 priority: 0,
             },
         )

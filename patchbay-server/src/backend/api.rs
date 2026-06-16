@@ -14,12 +14,12 @@ use rootcause::{Result, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{
+    app_state::AppState,
     automation, comments,
     comments::AddComment,
     items,
     items::{CreateWorkItem, UpdateWorkItem},
     projects,
-    ui::AppState,
 };
 
 #[derive(Debug, Deserialize)]

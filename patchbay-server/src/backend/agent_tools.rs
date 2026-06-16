@@ -36,6 +36,7 @@ pub async fn list_tools(store: &Store) -> Result<Vec<AgentToolView>> {
     tools.into_iter().map(model_to_view).collect()
 }
 
+#[cfg(test)]
 pub async fn set_tool_path(
     store: &Store,
     tool: AgentToolName,

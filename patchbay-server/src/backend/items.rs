@@ -154,6 +154,22 @@ pub async fn has_unclaimed_item_matching_condition(
     Ok(false)
 }
 
+pub async fn item_matches_condition(
+    store: &Store,
+    project_name: &str,
+    item_id: i64,
+    condition: &Condition,
+) -> Result<bool> {
+    validate_label_condition(condition)?;
+    let project_id = projects::project_id(store, project_name).await?;
+    let item = get_item_model(store, project_id, item_id).await?;
+    let labels = labels_for_item(store.db().as_ref(), project_id, item.id).await?;
+    if automation_blocked(&labels) {
+        return Ok(false);
+    }
+    label_condition_matches(condition, &labels)
+}
+
 pub async fn get_item(store: &Store, project_name: &str, item_id: i64) -> Result<WorkItemView> {
     let project_id = projects::project_id(store, project_name).await?;
     let item = get_item_model(store, project_id, item_id).await?;

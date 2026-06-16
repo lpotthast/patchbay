@@ -126,7 +126,7 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 [dev-dependencies]
 assertr = "0.6.0"
 browser-test = "0.2.1"
-leptos-browser-test = "0.2.0"
+leptos-browser-test = { version = "0.2.1", path = "../../leptos-browser-test" }
 tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

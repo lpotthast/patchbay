@@ -12,8 +12,9 @@ use leptos_browser_test::{LeptosTestApp, LeptosTestAppConfig, Report, ResultExt,
 use tempfile::TempDir;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "starts Patchbay and Chrome; run with `just browser-test`"]
 async fn browser_tests() -> Result<(), Report> {
+    tracing_subscriber::fmt().init();
+
     let app = PatchbayTestApp::start().await?;
 
     BrowserTestRunner::new()
@@ -53,7 +54,7 @@ impl PatchbayTestApp {
 
         let app = LeptosTestAppConfig::new(env!("CARGO_MANIFEST_DIR"))
             .with_app_name("patchbay browser test")
-            .with_forward_logs(false)
+            .with_forward_logs(true)
             .with_startup_line("Serving Patchbay")
             .with_env("PATCHBAY_DATABASE", database.as_os_str())
             .start()
@@ -206,7 +207,9 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         assert_source_does_not_contain(driver, "Deserialize(").await?;
         assert_source_does_not_contain(driver, "missing field `identifier`").await?;
         assert_source_does_not_contain(driver, "unknown variant `Position`").await?;
-        find(driver, By::Css(".lane:first-child .lane-add")).await?;
+        find(driver, By::Css(".lane:nth-child(1) .lane-add")).await?;
+        find(driver, By::Css(".lane:nth-child(2) .lane-add")).await?;
+        assert_lane_add_button_count(driver, 2).await?;
         assert_source_does_not_contain(driver, "data-crudkit-leptos=\"automation-triggers\"")
             .await?;
         assert_crudkit_create_form_survives_live_event(driver).await?;
@@ -224,7 +227,8 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         .await?;
         find(driver, By::Css(".trigger-runs")).await?;
         assert_source_contains(driver, "data-crudkit-leptos=\"automation-triggers\"").await?;
-        assert_source_contains(driver, "Automation rules").await?;
+        assert_source_contains(driver, "Work-consuming automations").await?;
+        assert_source_contains(driver, "Work-producing automations").await?;
         assert_source_contains(driver, "No automation selected").await?;
         assert_source_does_not_contain(driver, "Create trigger").await?;
         assert_source_does_not_contain(driver, "trigger-edit-form").await?;
@@ -258,6 +262,7 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
             .context("failed to reopen Patchbay board page after API check")?;
         open_new_item_modal(driver).await?;
         find(driver, By::Css("#new-item-modal select[name='state']")).await?;
+        assert_new_item_lane_options(driver).await?;
         find(
             driver,
             By::Css("#new-item-modal select[name='agent_model_override']"),
@@ -280,7 +285,7 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
 
         find(driver, By::LinkText("Browser item")).await?;
         assert_source_contains(driver, "Created through browser-test").await?;
-        assert_source_contains(driver, "state=open").await?;
+        assert_source_contains(driver, "state=idea").await?;
 
         click(driver, By::LinkText("Browser item")).await?;
         find(driver, By::Css("section.item-settings")).await?;
@@ -583,7 +588,7 @@ async fn create_trigger(driver: &WebDriver) -> Result<(), Report> {
                         mode: 'refine',
                         tool_name: 'codex',
                         prompt: 'Refine new work items.',
-                        work_item_selector: null,
+                        work_item_selector: '{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}}]}',
                         priority: 0
                     }
                 }),
@@ -616,6 +621,40 @@ async fn open_new_item_modal(driver: &WebDriver) -> Result<(), Report> {
     find(driver, By::Css("leptonic-modal#new-item-modal"))
         .await
         .map(|_| ())
+}
+
+async fn assert_lane_add_button_count(driver: &WebDriver, expected: usize) -> Result<(), Report> {
+    let count = driver
+        .execute(
+            "return String(document.querySelectorAll('.lane .lane-add').length);",
+            Vec::new(),
+        )
+        .await
+        .context("failed to count lane add buttons")?
+        .convert::<String>()
+        .context("failed to read lane add button count")?;
+    assert_that!(count).is_equal_to(expected.to_string());
+    Ok(())
+}
+
+async fn assert_new_item_lane_options(driver: &WebDriver) -> Result<(), Report> {
+    let summary = driver
+        .execute(
+            r#"
+            const select = document.querySelector('#new-item-modal select[name="state"]');
+            if (!select) {
+                throw new Error('missing new item lane select');
+            }
+            return `${select.value}|${Array.from(select.options).map(option => option.value).join(',')}`;
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to inspect new item lane options")?
+        .convert::<String>()
+        .context("failed to read new item lane options")?;
+    assert_that!(summary).is_equal_to("idea|idea,open".to_owned());
+    Ok(())
 }
 
 async fn assert_source_contains(driver: &WebDriver, expected: &str) -> Result<(), Report> {

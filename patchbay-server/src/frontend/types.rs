@@ -331,6 +331,7 @@ pub mod swim_lane {
         pub identifier: String,
         pub name: String,
         pub position: i64,
+        pub can_create_items: bool,
     }
 
     #[derive(Clone, PartialEq, Eq, Debug, Default, CkField, Serialize, Deserialize)]
@@ -340,6 +341,7 @@ pub mod swim_lane {
         pub identifier: String,
         pub name: String,
         pub position: i64,
+        pub can_create_items: bool,
     }
 
     #[derive(Clone, PartialEq, Eq, Debug, CkId, CkField, Serialize, Deserialize)]
@@ -350,6 +352,7 @@ pub mod swim_lane {
         pub identifier: String,
         pub name: String,
         pub position: i64,
+        pub can_create_items: bool,
         pub created_at: String,
         pub updated_at: String,
         pub has_validation_errors: bool,
@@ -362,6 +365,7 @@ pub mod swim_lane {
                 identifier: read.identifier,
                 name: read.name,
                 position: read.position,
+                can_create_items: read.can_create_items,
             }
         }
     }

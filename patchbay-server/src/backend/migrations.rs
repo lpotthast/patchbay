@@ -78,6 +78,7 @@ enum SwimLanes {
     Identifier,
     Name,
     Position,
+    CanCreateItems,
     CreatedAt,
     UpdatedAt,
 }
@@ -205,6 +206,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddAutomationWorkItemSelectorsTransientName),
             Box::new(RenameAutomationActivationAndRequireSchedule),
             Box::new(AddWorkItemStateLabelReadView),
+            Box::new(AddSwimLaneCreateItemFlag),
         ]
     }
 }
@@ -1848,6 +1850,47 @@ impl MigrationTrait for AddWorkItemStateLabelReadView {
     }
 }
 
+struct AddSwimLaneCreateItemFlag;
+
+impl MigrationName for AddSwimLaneCreateItemFlag {
+    fn name(&self) -> &str {
+        "m20260616_000022_add_swim_lane_create_item_flag"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddSwimLaneCreateItemFlag {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "swim_lanes_read_view").await?;
+        add_column_if_missing(
+            manager,
+            "swim_lanes",
+            "can_create_items",
+            "BOOLEAN NOT NULL DEFAULT 0",
+        )
+        .await?;
+        manager
+            .get_connection()
+            .execute(Statement::from_string(
+                manager.get_database_backend(),
+                r#"
+                UPDATE "swim_lanes"
+                SET "can_create_items" = 1
+                WHERE "identifier" IN ('idea', 'open');
+                "#
+                .to_owned(),
+            ))
+            .await?;
+        create_read_view(manager, "swim_lanes", "swim_lanes_read_view").await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "swim_lanes_read_view").await?;
+        drop_column_if_present(manager, "swim_lanes", "can_create_items").await?;
+        create_read_view(manager, "swim_lanes", "swim_lanes_read_view").await
+    }
+}
+
 async fn seed_default_work_item_automations(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .get_connection()
@@ -2017,6 +2060,12 @@ async fn create_swim_lanes(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                         .default(0),
                 )
                 .col(
+                    ColumnDef::new(SwimLanes::CanCreateItems)
+                        .boolean()
+                        .not_null()
+                        .default(false),
+                )
+                .col(
                     ColumnDef::new(SwimLanes::CreatedAt)
                         .string()
                         .not_null()
@@ -2078,8 +2127,8 @@ async fn migrate_work_item_state_to_labels(manager: &SchemaManager<'_>) -> Resul
         backend,
         r#"
         INSERT OR IGNORE INTO "swim_lanes"
-            ("project_id", "identifier", "name", "position", "created_at", "updated_at")
-        SELECT "id", 'idea', 'Idea', 10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            ("project_id", "identifier", "name", "position", "can_create_items", "created_at", "updated_at")
+        SELECT "id", 'idea', 'Idea', 10, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         FROM "projects";
         "#,
     ))
@@ -2088,8 +2137,8 @@ async fn migrate_work_item_state_to_labels(manager: &SchemaManager<'_>) -> Resul
         backend,
         r#"
         INSERT OR IGNORE INTO "swim_lanes"
-            ("project_id", "identifier", "name", "position", "created_at", "updated_at")
-        SELECT "id", 'open', 'Open', 20, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            ("project_id", "identifier", "name", "position", "can_create_items", "created_at", "updated_at")
+        SELECT "id", 'open', 'Open', 20, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         FROM "projects";
         "#,
     ))
@@ -2098,8 +2147,8 @@ async fn migrate_work_item_state_to_labels(manager: &SchemaManager<'_>) -> Resul
         backend,
         r#"
         INSERT OR IGNORE INTO "swim_lanes"
-            ("project_id", "identifier", "name", "position", "created_at", "updated_at")
-        SELECT "id", 'in_progress', 'In progress', 30, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            ("project_id", "identifier", "name", "position", "can_create_items", "created_at", "updated_at")
+        SELECT "id", 'in_progress', 'In progress', 30, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         FROM "projects";
         "#,
     ))
@@ -2108,8 +2157,8 @@ async fn migrate_work_item_state_to_labels(manager: &SchemaManager<'_>) -> Resul
         backend,
         r#"
         INSERT OR IGNORE INTO "swim_lanes"
-            ("project_id", "identifier", "name", "position", "created_at", "updated_at")
-        SELECT "id", 'done', 'Done', 40, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            ("project_id", "identifier", "name", "position", "can_create_items", "created_at", "updated_at")
+        SELECT "id", 'done', 'Done', 40, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         FROM "projects";
         "#,
     ))

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 #[cfg(feature = "ssr")]
-use crate::backend::ui;
+use crate::backend::{app_state, page_data};
 use crate::{
     frontend::routes::routes,
     frontend::types::{
@@ -32,9 +32,9 @@ use crate::{
         AgentRunOutputPiece, AgentRunStatus, AgentRunView, AutomationStatusView,
         CLAIMED_FROM_STATE_LABEL_KEY, CodexAgentModel, CodexAppServerStatusView,
         CodexAuthSetupView, CodexRateLimitView, CodexUsageSummaryView, CommentView,
-        DEFAULT_STATE_LABEL, ProjectLabelView, ProjectMemoryEventRefView, ProjectMemoryEventView,
-        ProjectSettingsView, ProjectView, RunLogView, STATE_LABEL_KEY, SwimLaneView, UiEvent,
-        WorkItemLabelView, WorkItemView,
+        ProjectLabelView, ProjectMemoryEventRefView, ProjectMemoryEventView, ProjectSettingsView,
+        ProjectView, RunLogView, STATE_LABEL_KEY, SwimLaneView, UiEvent, WorkItemLabelView,
+        WorkItemView,
     },
 };
 #[cfg(not(feature = "ssr"))]
@@ -79,6 +79,19 @@ use serde::{Deserialize, Serialize};
 
 const TOOL_OUTPUT_PREVIEW_CHARS: usize = 1200;
 const BOARD_ITEMS_REFRESH_INTERVAL_MS: u64 = 30_000;
+const DEFAULT_CREATE_ITEM_STATE: &str = "idea";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreateItemLaneOption {
+    identifier: String,
+    name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CreateItemOpenRequest {
+    AnyCreatableLane,
+    SingleLane(String),
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BoardPage {
@@ -303,9 +316,9 @@ async fn load_board_page(
     selected_project: Option<String>,
     api_base_url: String,
 ) -> Result<BoardPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
-    ui::board_page_data(
+    page_data::board_page_data(
         &state.store,
         &state.sessions,
         &state.automation_controller,
@@ -319,8 +332,8 @@ async fn load_board_page(
 
 #[server(prefix = "/leptos")]
 async fn load_board_items_section(project: String) -> Result<BoardItemsSection, ServerFnError> {
-    let state = ui::app_state();
-    ui::board_items_section(&state.store, &project)
+    let state = app_state::app_state();
+    page_data::board_items_section(&state.store, &project)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))
 }
@@ -329,8 +342,8 @@ async fn load_board_items_section(project: String) -> Result<BoardItemsSection, 
 async fn load_board_automation_section(
     project: String,
 ) -> Result<BoardAutomationSection, ServerFnError> {
-    let state = ui::app_state();
-    ui::board_automation_section(
+    let state = app_state::app_state();
+    page_data::board_automation_section(
         &state.store,
         &state.sessions,
         &state.automation_controller,
@@ -363,9 +376,9 @@ async fn load_projects_page(
     selected_project: Option<String>,
     api_base_url: String,
 ) -> Result<ProjectsPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
-    ui::projects_page_data(
+    page_data::projects_page_data(
         &state.store,
         &state.automation_controller,
         codex_status,
@@ -395,9 +408,9 @@ async fn load_triggers_page(
     selected_project: Option<String>,
     api_base_url: String,
 ) -> Result<TriggersPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
-    ui::triggers_page_data(
+    page_data::triggers_page_data(
         &state.store,
         &state.automation_controller,
         codex_status,
@@ -413,8 +426,8 @@ async fn load_trigger_run_sessions(
     project: String,
     trigger_id: i64,
 ) -> Result<Vec<BoardRunSessionView>, ServerFnError> {
-    let state = ui::app_state();
-    ui::trigger_run_sessions(&state.store, &state.sessions, &project, trigger_id)
+    let state = app_state::app_state();
+    page_data::trigger_run_sessions(&state.store, &state.sessions, &project, trigger_id)
         .await
         .map_err(|err| ServerFnError::new(err.to_string()))
 }
@@ -435,9 +448,9 @@ pub fn PageCodex() -> impl IntoView {
 async fn load_codex_status_page(
     selected_project: Option<String>,
 ) -> Result<CodexStatusPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
-    ui::codex_status_page_data(
+    page_data::codex_status_page_data(
         &state.store,
         &state.automation_controller,
         codex_status,
@@ -473,10 +486,10 @@ async fn load_item_page(
     project: Option<String>,
     item_id: Option<i64>,
 ) -> Result<ItemPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
     match (project, item_id) {
-        (Some(project), Some(item_id)) => ui::item_page_data(
+        (Some(project), Some(item_id)) => page_data::item_page_data(
             &state.store,
             &state.automation_controller,
             &project,
@@ -515,10 +528,10 @@ async fn load_run_log_page(
     project: Option<String>,
     run_id: Option<i64>,
 ) -> Result<RunLogPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
     match (project, run_id) {
-        (Some(project), Some(run_id)) => ui::run_log_page_data(
+        (Some(project), Some(run_id)) => page_data::run_log_page_data(
             &state.store,
             &state.automation_controller,
             &project,
@@ -547,9 +560,9 @@ pub fn PageApiDocs() -> impl IntoView {
 async fn load_api_docs_page(
     selected_project: Option<String>,
 ) -> Result<ApiDocsPage, ServerFnError> {
-    let state = ui::app_state();
+    let state = app_state::app_state();
     let codex_status = state.codex_status.read().await.clone();
-    ui::api_docs_page_data(
+    page_data::api_docs_page_data(
         &state.store,
         &state.automation_controller,
         codex_status,
@@ -843,9 +856,23 @@ fn board_content(page: BoardPage) -> AnyView {
         let project_workspace =
             project_workspace_panel(&project, &project_view, board_return_to.clone());
         let (show_create_item_modal, set_show_create_item_modal) = signal(false);
-        let (create_item_state, set_create_item_state) = signal(DEFAULT_STATE_LABEL.to_owned());
-        let open_create_item = Callback::new(move |state: String| {
-            set_create_item_state.set(state);
+        let initial_create_item_lane_options = creatable_lane_options(&swim_lanes);
+        let initial_create_item_state =
+            default_create_item_state(&initial_create_item_lane_options);
+        let (create_item_state, set_create_item_state) = signal(initial_create_item_state);
+        let (create_item_lane_options, set_create_item_lane_options) =
+            signal(initial_create_item_lane_options);
+        let (create_item_swim_lanes, set_create_item_swim_lanes) = signal(swim_lanes.clone());
+        let has_create_item_lanes =
+            Memo::new(move |_| !creatable_lane_options(&create_item_swim_lanes.get()).is_empty());
+        let open_create_item = Callback::new(move |request: CreateItemOpenRequest| {
+            let lanes = create_item_swim_lanes.get_untracked();
+            let options = create_item_options_for_request(&lanes, &request);
+            if options.is_empty() {
+                return;
+            }
+            set_create_item_state.set(default_create_item_state(&options));
+            set_create_item_lane_options.set(options);
             set_show_create_item_modal.set(true);
         });
         let board = view! {
@@ -855,13 +882,16 @@ fn board_content(page: BoardPage) -> AnyView {
                 initial_swim_lanes=swim_lanes
                 initial_misconfigured_item_count=misconfigured_item_count
                 open_create_item=open_create_item
+                set_create_item_swim_lanes=set_create_item_swim_lanes
             />
         };
         let create_item = create_item_modal(
             &project,
             show_create_item_modal,
             set_show_create_item_modal,
+            create_item_lane_options,
             create_item_state,
+            set_create_item_state,
         );
         let work_items_api_base_url = api_base_url.clone();
         let swim_lanes_api_base_url = api_base_url;
@@ -889,7 +919,10 @@ fn board_content(page: BoardPage) -> AnyView {
                         </div>
                         <button
                             type="button"
-                            on:click=move |_| open_create_item.run(DEFAULT_STATE_LABEL.to_owned())
+                            disabled=move || !has_create_item_lanes.get()
+                            on:click=move |_| {
+                                open_create_item.run(CreateItemOpenRequest::AnyCreatableLane)
+                            }
                         >
                             "New item"
                         </button>
@@ -975,17 +1008,31 @@ fn triggers_content(page: TriggersPage) -> AnyView {
     );
 
     if let (Some(project), Some(project_view)) = (selected_project, selected_project_view) {
-        let (trigger_context, set_trigger_context) = signal(None::<CrudInstanceContext>);
+        let (consumer_context, set_consumer_context) = signal(None::<CrudInstanceContext>);
+        let (producer_context, set_producer_context) = signal(None::<CrudInstanceContext>);
         let selected_trigger_id = Memo::new(move |_| {
-            trigger_context
+            consumer_context
                 .get()
                 .and_then(selected_trigger_id_from_context)
+                .or_else(|| {
+                    producer_context
+                        .get()
+                        .and_then(selected_trigger_id_from_context)
+                })
         });
-        let triggers = automation_triggers_crudkit_instance(
+        let consuming_triggers = automation_triggers_crudkit_instance(
+            api_base_url.clone(),
+            project.clone(),
+            project_view.id,
+            AutomationTableKind::Consuming,
+            Callback::new(move |context| set_consumer_context.set(Some(context))),
+        );
+        let producing_triggers = automation_triggers_crudkit_instance(
             api_base_url,
             project.clone(),
             project_view.id,
-            Callback::new(move |context| set_trigger_context.set(Some(context))),
+            AutomationTableKind::Producing,
+            Callback::new(move |context| set_producer_context.set(Some(context))),
         );
         let trigger_runs = trigger_runs_panel(project.clone(), selected_trigger_id);
         view! {
@@ -997,10 +1044,18 @@ fn triggers_content(page: TriggersPage) -> AnyView {
                     </section>
                     <section class="automation-triggers panel">
                         <div class="panel-heading">
-                            <h2>"Automation rules"</h2>
+                            <h2>"Work-consuming automations"</h2>
                         </div>
                         <div class="crudkit-automation-triggers" data-crudkit-leptos="automation-triggers">
-                            {triggers}
+                            {consuming_triggers}
+                        </div>
+                    </section>
+                    <section class="automation-triggers panel">
+                        <div class="panel-heading">
+                            <h2>"Work-producing automations"</h2>
+                        </div>
+                        <div class="crudkit-automation-triggers" data-crudkit-leptos="automation-triggers">
+                            {producing_triggers}
                         </div>
                     </section>
                     {trigger_runs}
@@ -2565,6 +2620,14 @@ fn swim_lanes_crudkit_config(api_base_url: String, project_id: i64) -> CrudInsta
                     ..Default::default()
                 },
             ),
+            Header::showing(
+                ReadSwimLaneField::CanCreateItems,
+                HeaderOptions {
+                    display_name: "Can create items".into(),
+                    min_width: true,
+                    ..Default::default()
+                },
+            ),
         ],
         create_elements: CreateElements::Custom(vec![Elem::Enclosing(Enclosing::None(Group {
             layout: Layout::default(),
@@ -2587,6 +2650,13 @@ fn swim_lanes_crudkit_config(api_base_url: String, project_id: i64) -> CrudInsta
                     CreateSwimLaneField::Position,
                     FieldOptions {
                         label: Some(Label::new("Position")),
+                        ..Default::default()
+                    },
+                ),
+                Elem::create_field(
+                    CreateSwimLaneField::CanCreateItems,
+                    FieldOptions {
+                        label: Some(Label::new("Can create items")),
                         ..Default::default()
                     },
                 ),
@@ -2621,6 +2691,13 @@ fn swim_lanes_crudkit_config(api_base_url: String, project_id: i64) -> CrudInsta
                     SwimLaneField::Position,
                     FieldOptions {
                         label: Some(Label::new("Position")),
+                        ..Default::default()
+                    },
+                ),
+                Elem::field(
+                    SwimLaneField::CanCreateItems,
+                    FieldOptions {
+                        label: Some(Label::new("Can create items")),
                         ..Default::default()
                     },
                 ),
@@ -2782,10 +2859,59 @@ fn agent_tools_crudkit_config(api_base_url: String) -> CrudInstanceConfig {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AutomationTableKind {
+    Consuming,
+    Producing,
+}
+
+impl AutomationTableKind {
+    fn instance_name(self) -> &'static str {
+        match self {
+            Self::Consuming => "work-consuming-automations",
+            Self::Producing => "work-producing-automations",
+        }
+    }
+
+    fn effect(self) -> &'static str {
+        match self {
+            Self::Consuming => "consume_work",
+            Self::Producing => "produce_work",
+        }
+    }
+
+    fn default_activation(self) -> &'static str {
+        match self {
+            Self::Consuming => "work_item",
+            Self::Producing => "manual",
+        }
+    }
+
+    fn default_selector(self) -> Option<String> {
+        match self {
+            Self::Consuming => CreateAutomationTrigger::default().work_item_selector,
+            Self::Producing => None,
+        }
+    }
+
+    fn activation_choices(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Consuming => &[
+                ("manual", "manual"),
+                ("work_item", "work_item"),
+                ("work_item_created", "work_item_created"),
+                ("cron", "cron"),
+            ],
+            Self::Producing => &[("manual", "manual"), ("cron", "cron")],
+        }
+    }
+}
+
 fn automation_triggers_crudkit_instance(
     api_base_url: String,
     project: String,
     project_id: i64,
+    kind: AutomationTableKind,
     on_context_created: Callback<CrudInstanceContext>,
 ) -> impl IntoView + 'static {
     let (context, set_context) = signal(None::<CrudInstanceContext>);
@@ -2800,265 +2926,265 @@ fn automation_triggers_crudkit_instance(
 
     view! {
         <CrudInstance
-            name="automation-triggers"
-            config=automation_triggers_crudkit_config(api_base_url, project_id)
+            name=kind.instance_name()
+            config=automation_triggers_crudkit_config(api_base_url, project_id, kind)
             on_context_created=created
         />
     }
 }
 
-fn automation_triggers_crudkit_config(api_base_url: String, project_id: i64) -> CrudInstanceConfig {
+fn automation_triggers_crudkit_config(
+    api_base_url: String,
+    project_id: i64,
+    kind: AutomationTableKind,
+) -> CrudInstanceConfig {
+    let mut list_columns = vec![
+        Header::showing(
+            ReadAutomationTriggerField::Id,
+            HeaderOptions {
+                display_name: "#".into(),
+                min_width: true,
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::Name,
+            HeaderOptions {
+                display_name: "Name".into(),
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::Activation,
+            HeaderOptions {
+                display_name: "Activation".into(),
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::Schedule,
+            HeaderOptions {
+                display_name: "Schedule".into(),
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::Enabled,
+            HeaderOptions {
+                display_name: "Enabled".into(),
+                min_width: true,
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::Priority,
+            HeaderOptions {
+                display_name: "Priority".into(),
+                min_width: true,
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::EvaluationCount,
+            HeaderOptions {
+                display_name: "Evaluations".into(),
+                min_width: true,
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::PendingEvaluationCount,
+            HeaderOptions {
+                display_name: "Queued".into(),
+                min_width: true,
+                ..Default::default()
+            },
+        ),
+        Header::showing(
+            ReadAutomationTriggerField::NextEvaluationAt,
+            HeaderOptions {
+                display_name: "Next evaluation".into(),
+                ..Default::default()
+            },
+        ),
+    ];
+    if matches!(kind, AutomationTableKind::Consuming) {
+        list_columns.insert(
+            4,
+            Header::showing(
+                ReadAutomationTriggerField::Mode,
+                HeaderOptions {
+                    display_name: "Mode".into(),
+                    ..Default::default()
+                },
+            ),
+        );
+    }
+
+    let mut create_children = vec![
+        Elem::create_field(
+            CreateAutomationTriggerField::Name,
+            FieldOptions {
+                label: Some(Label::new("Name")),
+                ..Default::default()
+            },
+        ),
+        Elem::create_field(
+            CreateAutomationTriggerField::Activation,
+            FieldOptions {
+                label: Some(Label::new("Activation")),
+                ..Default::default()
+            },
+        ),
+        Elem::create_field(
+            CreateAutomationTriggerField::Schedule,
+            FieldOptions {
+                label: Some(Label::new("Schedule")),
+                ..Default::default()
+            },
+        ),
+        Elem::create_field(
+            CreateAutomationTriggerField::Enabled,
+            FieldOptions {
+                label: Some(Label::new("Enabled")),
+                ..Default::default()
+            },
+        ),
+        Elem::create_field(
+            CreateAutomationTriggerField::Priority,
+            FieldOptions {
+                label: Some(Label::new("Priority")),
+                ..Default::default()
+            },
+        ),
+    ];
+    if matches!(kind, AutomationTableKind::Consuming) {
+        create_children.push(Elem::create_field(
+            CreateAutomationTriggerField::WorkItemSelector,
+            FieldOptions {
+                label: Some(Label::new("Work item selector")),
+                ..Default::default()
+            },
+        ));
+    }
+    create_children.push(Elem::create_field(
+        CreateAutomationTriggerField::Prompt,
+        FieldOptions {
+            label: Some(Label::new("Prompt")),
+            ..Default::default()
+        },
+    ));
+
+    let mut update_children = vec![
+        Elem::field(
+            AutomationTrigger::Id,
+            FieldOptions {
+                disabled: true,
+                label: Some(Label::new("ID")),
+                ..Default::default()
+            },
+        ),
+        Elem::field(
+            AutomationTriggerField::Name,
+            FieldOptions {
+                label: Some(Label::new("Name")),
+                ..Default::default()
+            },
+        ),
+        Elem::field(
+            AutomationTriggerField::Activation,
+            FieldOptions {
+                label: Some(Label::new("Activation")),
+                ..Default::default()
+            },
+        ),
+        Elem::field(
+            AutomationTriggerField::Schedule,
+            FieldOptions {
+                label: Some(Label::new("Schedule")),
+                ..Default::default()
+            },
+        ),
+        Elem::field(
+            AutomationTriggerField::Enabled,
+            FieldOptions {
+                label: Some(Label::new("Enabled")),
+                ..Default::default()
+            },
+        ),
+        Elem::field(
+            AutomationTriggerField::Priority,
+            FieldOptions {
+                label: Some(Label::new("Priority")),
+                ..Default::default()
+            },
+        ),
+    ];
+    if matches!(kind, AutomationTableKind::Consuming) {
+        update_children.push(Elem::field(
+            AutomationTriggerField::WorkItemSelector,
+            FieldOptions {
+                label: Some(Label::new("Work item selector")),
+                ..Default::default()
+            },
+        ));
+    }
+    update_children.push(Elem::field(
+        AutomationTriggerField::Prompt,
+        FieldOptions {
+            label: Some(Label::new("Prompt")),
+            ..Default::default()
+        },
+    ));
+
     CrudInstanceConfig {
         api_base_url,
         view: SerializableCrudView::List,
-        list_columns: vec![
-            Header::showing(
-                ReadAutomationTriggerField::Id,
-                HeaderOptions {
-                    display_name: "#".into(),
-                    min_width: true,
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::Name,
-                HeaderOptions {
-                    display_name: "Name".into(),
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::Activation,
-                HeaderOptions {
-                    display_name: "Activation".into(),
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::Effect,
-                HeaderOptions {
-                    display_name: "Effect".into(),
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::Schedule,
-                HeaderOptions {
-                    display_name: "Schedule".into(),
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::Enabled,
-                HeaderOptions {
-                    display_name: "Enabled".into(),
-                    min_width: true,
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::Priority,
-                HeaderOptions {
-                    display_name: "Priority".into(),
-                    min_width: true,
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::EvaluationCount,
-                HeaderOptions {
-                    display_name: "Evaluations".into(),
-                    min_width: true,
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::PendingEvaluationCount,
-                HeaderOptions {
-                    display_name: "Queued".into(),
-                    min_width: true,
-                    ..Default::default()
-                },
-            ),
-            Header::showing(
-                ReadAutomationTriggerField::NextEvaluationAt,
-                HeaderOptions {
-                    display_name: "Next evaluation".into(),
-                    ..Default::default()
-                },
-            ),
-        ],
+        list_columns,
         create_elements: CreateElements::Custom(vec![Elem::Enclosing(Enclosing::None(Group {
             layout: Layout::default(),
-            children: vec![
-                Elem::create_field(
-                    CreateAutomationTriggerField::Name,
-                    FieldOptions {
-                        label: Some(Label::new("Name")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::Activation,
-                    FieldOptions {
-                        label: Some(Label::new("Activation")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::Effect,
-                    FieldOptions {
-                        label: Some(Label::new("Effect")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::Schedule,
-                    FieldOptions {
-                        label: Some(Label::new("Schedule")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::Enabled,
-                    FieldOptions {
-                        label: Some(Label::new("Enabled")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::Priority,
-                    FieldOptions {
-                        label: Some(Label::new("Priority")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::WorkItemSelector,
-                    FieldOptions {
-                        label: Some(Label::new("Work item selector")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::create_field(
-                    CreateAutomationTriggerField::Prompt,
-                    FieldOptions {
-                        label: Some(Label::new("Prompt")),
-                        ..Default::default()
-                    },
-                ),
-            ],
+            children: create_children,
         }))]),
         elements: vec![Elem::Enclosing(Enclosing::None(Group {
             layout: Layout::default(),
-            children: vec![
-                Elem::field(
-                    AutomationTrigger::Id,
-                    FieldOptions {
-                        disabled: true,
-                        label: Some(Label::new("ID")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Name,
-                    FieldOptions {
-                        label: Some(Label::new("Name")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Activation,
-                    FieldOptions {
-                        label: Some(Label::new("Activation")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Effect,
-                    FieldOptions {
-                        label: Some(Label::new("Effect")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Schedule,
-                    FieldOptions {
-                        label: Some(Label::new("Schedule")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Enabled,
-                    FieldOptions {
-                        label: Some(Label::new("Enabled")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Priority,
-                    FieldOptions {
-                        label: Some(Label::new("Priority")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::WorkItemSelector,
-                    FieldOptions {
-                        label: Some(Label::new("Work item selector")),
-                        ..Default::default()
-                    },
-                ),
-                Elem::field(
-                    AutomationTriggerField::Prompt,
-                    FieldOptions {
-                        label: Some(Label::new("Prompt")),
-                        ..Default::default()
-                    },
-                ),
-            ],
+            children: update_children,
         }))],
         order_by: indexmap! {
             ReadAutomationTrigger::Name.into() => Order::Asc,
         },
         items_per_page: ItemsPerPage::default(),
         page_nr: PageNr::first(),
-        base_condition: Some(project_id_condition(project_id)),
+        base_condition: Some(automation_effect_condition(project_id, kind.effect())),
         resource_name: CrudAutomationTriggerResource::resource_name().to_owned(),
         reqwest_executor: Arc::new(NewClientPerRequestExecutor),
-        model_handler: automation_trigger_model_handler(project_id),
+        model_handler: automation_trigger_model_handler(project_id, kind),
         actions: vec![],
         entity_actions: vec![],
         read_field_renderer: FieldRendererRegistry::builder().build(),
         create_field_renderer: FieldRendererRegistry::builder()
             .register(
                 CreateAutomationTriggerField::Activation,
-                activation_field_renderer::<DynCreateField>(),
-            )
-            .register(
-                CreateAutomationTriggerField::Effect,
-                effect_field_renderer::<DynCreateField>(),
+                activation_field_renderer::<DynCreateField>(kind.activation_choices()),
             )
             .build(),
         update_field_renderer: FieldRendererRegistry::builder()
             .register(
                 AutomationTriggerField::Activation,
-                activation_field_renderer::<DynUpdateField>(),
-            )
-            .register(
-                AutomationTriggerField::Effect,
-                effect_field_renderer::<DynUpdateField>(),
+                activation_field_renderer::<DynUpdateField>(kind.activation_choices()),
             )
             .build(),
     }
 }
 
-fn automation_trigger_model_handler(project_id: i64) -> ModelHandler {
+fn automation_trigger_model_handler(project_id: i64, kind: AutomationTableKind) -> ModelHandler {
     let mut handler =
         ModelHandler::new::<CreateAutomationTrigger, ReadAutomationTrigger, AutomationTrigger>();
     handler.get_default_create_model = Callback::new(move |()| {
         DynCreateModel::from(CreateAutomationTrigger {
             project_id,
+            activation: kind.default_activation().to_owned(),
+            effect: kind.effect().to_owned(),
+            work_item_selector: kind.default_selector(),
             ..Default::default()
         })
     });
@@ -3318,53 +3444,10 @@ fn agent_reasoning_field_renderer<F: TypeErasedField>(
     )
 }
 
-fn activation_field_renderer<F: TypeErasedField>() -> FieldRenderer<F> {
-    FieldRenderer::new(
-        move |_signals, _field: F, field_mode, field_options, value, value_changed| {
-            let selected = Signal::derive(move || {
-                value
-                    .value
-                    .get()
-                    .as_string()
-                    .cloned()
-                    .unwrap_or_else(|| "work_item".to_owned())
-            });
-
-            match field_mode {
-                FieldMode::Display => view! { {move || selected.get()} }.into_any(),
-                FieldMode::Readable | FieldMode::Editable => {
-                    let disabled = field_mode != FieldMode::Editable || field_options.disabled;
-                    view! {
-                        {render_label(field_options.label.clone())}
-                        <select
-                            class="crud-input-field"
-                            prop:value=move || selected.get()
-                            disabled=disabled
-                            on:change=move |event| {
-                                value_changed.run(Ok(Value::String(event_target_value(&event))));
-                            }
-                        >
-                            <option value="manual">"manual"</option>
-                            <option value="work_item">"work_item"</option>
-                            <option value="work_item_created">"work_item_created"</option>
-                            <option value="cron">"cron"</option>
-                        </select>
-                    }
-                    .into_any()
-                }
-            }
-        },
-    )
-}
-
-fn effect_field_renderer<F: TypeErasedField>() -> FieldRenderer<F> {
-    select_field_renderer(
-        &[
-            ("consume_work", "consume_work"),
-            ("produce_work", "produce_work"),
-        ],
-        false,
-    )
+fn activation_field_renderer<F: TypeErasedField>(
+    choices: &'static [(&'static str, &'static str)],
+) -> FieldRenderer<F> {
+    select_field_renderer(choices, false)
 }
 
 fn select_field_renderer<F: TypeErasedField>(
@@ -3433,6 +3516,21 @@ fn project_id_condition(project_id: i64) -> Condition {
         operator: Operator::Equal,
         value: ConditionClauseValue::I64(project_id),
     })])
+}
+
+fn automation_effect_condition(project_id: i64, effect: &str) -> Condition {
+    Condition::All(vec![
+        ConditionElement::Clause(ConditionClause {
+            column_name: "project_id".to_owned(),
+            operator: Operator::Equal,
+            value: ConditionClauseValue::I64(project_id),
+        }),
+        ConditionElement::Clause(ConditionClause {
+            column_name: "effect".to_owned(),
+            operator: Operator::Equal,
+            value: ConditionClauseValue::String(effect.to_owned()),
+        }),
+    ])
 }
 
 fn project_workspace_panel(
@@ -3722,7 +3820,8 @@ fn LiveBoardItems(
     initial_items: Vec<WorkItemView>,
     initial_swim_lanes: Vec<SwimLaneView>,
     initial_misconfigured_item_count: i64,
-    open_create_item: Callback<String>,
+    open_create_item: Callback<CreateItemOpenRequest>,
+    set_create_item_swim_lanes: WriteSignal<Vec<SwimLaneView>>,
 ) -> impl IntoView + 'static {
     let (items, set_items) = signal(initial_items);
     let (swim_lanes, set_swim_lanes) = signal(initial_swim_lanes);
@@ -3743,7 +3842,9 @@ fn LiveBoardItems(
     Effect::new(move |_| {
         if let Some(Ok(section)) = section.get() {
             set_items.set(section.items);
-            set_swim_lanes.set(section.swim_lanes);
+            let updated_swim_lanes = section.swim_lanes;
+            set_create_item_swim_lanes.set(updated_swim_lanes.clone());
+            set_swim_lanes.set(updated_swim_lanes);
             set_misconfigured_item_count.set(section.misconfigured_item_count);
         }
     });
@@ -4444,11 +4545,78 @@ fn maintenance_view(project: &str) -> impl IntoView + 'static {
     }
 }
 
+fn create_item_options_for_request(
+    swim_lanes: &[SwimLaneView],
+    request: &CreateItemOpenRequest,
+) -> Vec<CreateItemLaneOption> {
+    match request {
+        CreateItemOpenRequest::AnyCreatableLane => creatable_lane_options(swim_lanes),
+        CreateItemOpenRequest::SingleLane(identifier) => swim_lanes
+            .iter()
+            .filter(|lane| lane.can_create_items && lane.identifier == *identifier)
+            .map(create_item_lane_option)
+            .collect(),
+    }
+}
+
+fn creatable_lane_options(swim_lanes: &[SwimLaneView]) -> Vec<CreateItemLaneOption> {
+    swim_lanes
+        .iter()
+        .filter(|lane| lane.can_create_items)
+        .map(create_item_lane_option)
+        .collect()
+}
+
+fn create_item_lane_option(lane: &SwimLaneView) -> CreateItemLaneOption {
+    CreateItemLaneOption {
+        identifier: lane.identifier.clone(),
+        name: lane.name.clone(),
+    }
+}
+
+fn default_create_item_state(options: &[CreateItemLaneOption]) -> String {
+    options
+        .iter()
+        .find(|option| option.identifier == DEFAULT_CREATE_ITEM_STATE)
+        .or_else(|| options.first())
+        .map(|option| option.identifier.clone())
+        .unwrap_or_else(|| DEFAULT_CREATE_ITEM_STATE.to_owned())
+}
+
+fn create_item_lane_option_views(
+    options: Vec<CreateItemLaneOption>,
+    selected_state: String,
+) -> Vec<AnyView> {
+    if options.is_empty() {
+        return vec![
+            view! {
+                <option value="" selected=true>"No lanes available"</option>
+            }
+            .into_any(),
+        ];
+    }
+
+    options
+        .into_iter()
+        .map(|option| {
+            let selected = option.identifier == selected_state;
+            view! {
+                <option value=option.identifier selected=selected>
+                    {option.name}
+                </option>
+            }
+            .into_any()
+        })
+        .collect()
+}
+
 fn create_item_modal(
     project: &str,
     show_when: ReadSignal<bool>,
     set_show_when: WriteSignal<bool>,
+    lane_options: ReadSignal<Vec<CreateItemLaneOption>>,
     selected_state: ReadSignal<String>,
+    set_selected_state: WriteSignal<String>,
 ) -> impl IntoView + 'static {
     let action = StoredValue::new(format!("/projects/{}/items", encode_path(project)));
     view! {
@@ -4481,10 +4649,18 @@ fn create_item_modal(
                     </label>
                     <label>
                         <span>"Lane"</span>
-                        <select name="state">
-                            <option value=move || selected_state.get() selected=true>
-                                {move || selected_state.get()}
-                            </option>
+                        <select
+                            name="state"
+                            prop:value=move || selected_state.get()
+                            disabled=move || lane_options.get().is_empty()
+                            on:change=move |event| {
+                                set_selected_state.set(event_target_value(&event));
+                            }
+                        >
+                            {move || create_item_lane_option_views(
+                                lane_options.get(),
+                                selected_state.get(),
+                            )}
                         </select>
                     </label>
                     <label>
@@ -4508,7 +4684,9 @@ fn create_item_modal(
                     >
                         "Cancel"
                     </button>
-                    <button type="submit">"Create item"</button>
+                    <button type="submit" disabled=move || lane_options.get().is_empty()>
+                        "Create item"
+                    </button>
                 </ModalFooter>
             </form>
         </Modal>
@@ -4576,7 +4754,7 @@ fn board_view(
     items: Vec<WorkItemView>,
     swim_lanes: Vec<SwimLaneView>,
     misconfigured_item_count: i64,
-    open_create_item: Callback<String>,
+    open_create_item: Callback<CreateItemOpenRequest>,
 ) -> impl IntoView + 'static {
     let lanes = swim_lanes
         .into_iter()
@@ -4591,6 +4769,22 @@ fn board_view(
                 .collect::<Vec<_>>();
             let count = cards.len();
             let create_state = lane_identifier.clone();
+            let add_button = if lane.can_create_items {
+                view! {
+                    <button
+                        type="button"
+                        class="lane-add"
+                        on:click=move |_| {
+                            open_create_item.run(CreateItemOpenRequest::SingleLane(create_state.clone()))
+                        }
+                    >
+                        "+ Add"
+                    </button>
+                }
+                .into_any()
+            } else {
+                ().into_any()
+            };
             view! {
                 <section class="lane">
                     <header class="lane-header">
@@ -4598,13 +4792,7 @@ fn board_view(
                         <span class="lane-count">{count}</span>
                     </header>
                     <div class="lane-cards">{cards}</div>
-                    <button
-                        type="button"
-                        class="lane-add"
-                        on:click=move |_| open_create_item.run(create_state.clone())
-                    >
-                        "+ Add"
-                    </button>
+                    {add_button}
                 </section>
             }
         })
