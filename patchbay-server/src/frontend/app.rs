@@ -29,7 +29,7 @@ use crate::{
     },
     shared::view_models::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentReasoningEffort, AgentRunOutputKind,
-        AgentRunOutputPiece, AgentRunStatus, AgentRunView, AutomationStatusView,
+        AgentRunOutputPiece, AgentRunStatus, AgentRunView, AuthorType, AutomationStatusView,
         CLAIMED_FROM_STATE_LABEL_KEY, CodexAgentModel, CodexAppServerStatusView,
         CodexAuthSetupView, CodexRateLimitView, CodexUsageSummaryView, CommentView,
         ProjectLabelView, ProjectMemoryEventRefView, ProjectMemoryEventView, ProjectSettingsView,
@@ -1602,6 +1602,7 @@ fn item_content(page: ItemPage) -> AnyView {
             let author = comment
                 .author_name
                 .unwrap_or_else(|| comment.author_type.as_storage().to_owned());
+            let author = comment_author_view(&project, comment.author_type, author);
             view! {
                 <article>
                     <strong>{author}</strong>
@@ -1693,6 +1694,33 @@ fn item_content(page: ItemPage) -> AnyView {
         </div>
     }
     .into_any()
+}
+
+fn comment_author_view(project: &str, author_type: AuthorType, author: String) -> AnyView {
+    if author_type == AuthorType::Agent
+        && let Some(run_id) = infer_agent_comment_run_id(&author)
+    {
+        let href = format!(
+            "/projects/{}/automation/runs/{}/log",
+            encode_path(project),
+            run_id
+        );
+        return view! {
+            <a class="comment-author-link" href=href>{author}</a>
+        }
+        .into_any();
+    }
+
+    view! { {author} }.into_any()
+}
+
+fn infer_agent_comment_run_id(author: &str) -> Option<i64> {
+    let id = author.strip_prefix("patchbay-run-")?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let run_id = id.parse::<i64>().ok()?;
+    (run_id > 0).then_some(run_id)
 }
 
 fn item_labels_view(
@@ -5125,4 +5153,23 @@ fn preview(value: &str) -> String {
     }
 
     value.chars().take(MAX_PREVIEW_CHARS).collect::<String>() + "..."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_agent_comment_run_id;
+
+    #[test]
+    fn infers_run_id_from_patchbay_agent_name() {
+        assert_eq!(infer_agent_comment_run_id("patchbay-run-60"), Some(60));
+    }
+
+    #[test]
+    fn ignores_non_run_agent_names() {
+        assert_eq!(infer_agent_comment_run_id("codex"), None);
+        assert_eq!(infer_agent_comment_run_id("patchbay-run-"), None);
+        assert_eq!(infer_agent_comment_run_id("patchbay-run-0"), None);
+        assert_eq!(infer_agent_comment_run_id("patchbay-run-+60"), None);
+        assert_eq!(infer_agent_comment_run_id("patchbay-run-abc"), None);
+    }
 }

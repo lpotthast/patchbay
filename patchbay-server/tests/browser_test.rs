@@ -317,6 +317,23 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         assert_source_does_not_contain(driver, "automation can claim this item").await?;
         assert_source_contains(driver, "Start agent").await?;
         assert_source_contains(driver, "Comments").await?;
+        add_agent_comment(driver).await?;
+        let item_url = driver
+            .current_url()
+            .await
+            .context("failed to read item URL after adding agent comment")?;
+        driver
+            .goto(item_url.as_str())
+            .await
+            .context("failed to reload item page after adding agent comment")?;
+        find(
+            driver,
+            By::Css(
+                "section.comments .comment-author-link[href='/projects/demo/automation/runs/60/log']",
+            ),
+        )
+        .await?;
+        assert_source_contains(driver, "patchbay-run-60").await?;
         find(driver, By::Css("section.item-labels")).await?;
         send_keys(
             driver,
@@ -399,6 +416,38 @@ async fn seed_memory_history(driver: &WebDriver) -> Result<(), Report> {
         .convert::<String>()
         .context("failed to read memory seed response")?;
     assert_that!(seeded).is_equal_to("ok".to_owned());
+    Ok(())
+}
+
+async fn add_agent_comment(driver: &WebDriver) -> Result<(), Report> {
+    let created = driver
+        .execute_async(
+            r#"
+            const done = arguments[0];
+            const itemId = window.location.pathname.match(/\/items\/(\d+)$/)?.[1];
+            if (!itemId) {
+                done('missing item id');
+                return;
+            }
+            fetch(`/api/projects/demo/items/${itemId}/comments`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    author_type: 'agent',
+                    author_name: 'patchbay-run-60',
+                    body: 'Agent progress from browser test',
+                }),
+            }).then(async response => {
+                done(response.ok ? 'ok' : await response.text());
+            }).catch(error => done(String(error)));
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to add agent comment through API browser-test request")?
+        .convert::<String>()
+        .context("failed to read agent comment setup response")?;
+    assert_that!(created).is_equal_to("ok".to_owned());
     Ok(())
 }
 
