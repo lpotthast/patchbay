@@ -871,6 +871,57 @@ impl FromStr for AgentRunStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommitOutcome {
+    NotEvaluated,
+    NotRequired,
+    Committed,
+    SkippedNoChanges,
+    SkippedNoGitRepo,
+    MissingRequired,
+    Unknown,
+}
+
+impl AgentCommitOutcome {
+    pub fn as_storage(self) -> &'static str {
+        match self {
+            Self::NotEvaluated => "not_evaluated",
+            Self::NotRequired => "not_required",
+            Self::Committed => "committed",
+            Self::SkippedNoChanges => "skipped_no_changes",
+            Self::SkippedNoGitRepo => "skipped_no_git_repo",
+            Self::MissingRequired => "missing_required",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for AgentCommitOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_storage())
+    }
+}
+
+impl FromStr for AgentCommitOutcome {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().replace('-', "_").as_str() {
+            "not_evaluated" => Ok(Self::NotEvaluated),
+            "not_required" => Ok(Self::NotRequired),
+            "committed" => Ok(Self::Committed),
+            "skipped_no_changes" => Ok(Self::SkippedNoChanges),
+            "skipped_no_git_repo" => Ok(Self::SkippedNoGitRepo),
+            "missing_required" => Ok(Self::MissingRequired),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(ParseEnumError(
+                "commit outcome must be one of: not_evaluated, not_required, committed, skipped_no_changes, skipped_no_git_repo, missing_required, unknown",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentRunView {
     pub id: i64,
@@ -892,6 +943,9 @@ pub struct AgentRunView {
     pub prompt_path: Option<String>,
     pub agent_model: Option<String>,
     pub agent_reasoning_effort: Option<AgentReasoningEffort>,
+    pub commit_required: bool,
+    pub commit_outcome: AgentCommitOutcome,
+    pub commit_shas: Vec<String>,
     pub pr_requested: bool,
     pub pr_url: Option<String>,
     pub cleanup_status: String,

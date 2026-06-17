@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fmt, fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command as StdCommand,
     str::FromStr,
@@ -14,7 +15,8 @@ use codex_app_server_sdk::{
 };
 use crudkit_core::condition::Condition;
 use git2::{
-    Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions, build::CheckoutBuilder,
+    ErrorCode as GitErrorCode, Oid, Repository, Sort, StatusOptions, WorktreeAddOptions,
+    WorktreePruneOptions, build::CheckoutBuilder,
 };
 use rootcause::{Result, prelude::*};
 use sea_orm::{
@@ -33,12 +35,12 @@ use crate::{
         storage::{Store, utc_now},
     },
     shared::view_models::{
-        AUTOMATION_BLOCKED_LABEL_KEY, AgentGitRuntimePolicy, AgentReasoningEffort,
-        AgentRunOutputKind, AgentRunOutputLog, AgentRunOutputPiece, AgentRunStatus, AgentRunView,
-        AgentSandboxMode, AgentToolName, AutomationMode, AutomationStatusView,
-        CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL, FINISHED_STATE_LABEL,
-        ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView, RevertStrategy,
-        RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
+        AUTOMATION_BLOCKED_LABEL_KEY, AgentCommitOutcome, AgentGitRuntimePolicy,
+        AgentReasoningEffort, AgentRunOutputKind, AgentRunOutputLog, AgentRunOutputPiece,
+        AgentRunStatus, AgentRunView, AgentSandboxMode, AgentToolName, AutomationMode,
+        AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL,
+        FINISHED_STATE_LABEL, ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView,
+        RevertStrategy, RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -90,6 +92,7 @@ struct LaunchDetails {
     memory_event_id: Option<i64>,
     agent_model: Option<String>,
     agent_reasoning_effort: Option<AgentReasoningEffort>,
+    commit_required: bool,
     pr_requested: bool,
 }
 
@@ -149,6 +152,32 @@ enum ClaimReleaseReason {
     Completed,
     Failed,
     Cancelled,
+}
+
+#[derive(Clone, Debug)]
+struct GitSnapshot {
+    head: Option<Oid>,
+    status: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+enum GitInspection {
+    Repository(GitSnapshot),
+    NoRepository,
+}
+
+#[derive(Clone, Debug)]
+struct CommitBaseline {
+    required: bool,
+    inspection: std::result::Result<GitInspection, String>,
+}
+
+#[derive(Clone, Debug)]
+struct CommitOutcomeEvaluation {
+    outcome: AgentCommitOutcome,
+    shas: Vec<String>,
+    detail: Option<String>,
+    validation_failed: bool,
 }
 
 struct ClaimReleaseContext<'a> {
@@ -667,6 +696,7 @@ async fn complete_started_automation_run(
             memory_event_id,
             agent_model: agent_model.clone(),
             agent_reasoning_effort,
+            commit_required: commit_required_for_policy(&settings),
             pr_requested: settings.create_pr,
         },
     )
@@ -686,6 +716,10 @@ async fn complete_started_automation_run(
         }
     };
 
+    let commit_baseline = capture_commit_baseline(
+        Path::new(&run.working_dir),
+        commit_required_for_policy(&settings),
+    );
     let output = run_agent_process(
         AgentProcessStart {
             run_id: run.id,
@@ -723,6 +757,19 @@ async fn complete_started_automation_run(
             } else {
                 "Codex app-server turn completed successfully with a final response".to_owned()
             };
+            let commit_evaluation =
+                evaluate_commit_outcome(Path::new(&run.working_dir), &commit_baseline);
+            run = update_run_commit_outcome(store, run, &commit_evaluation).await?;
+            if commit_evaluation.validation_failed {
+                success = false;
+                result_summary = format!(
+                    "Codex app-server turn completed, but required git commit is missing: {}",
+                    commit_evaluation
+                        .detail
+                        .as_deref()
+                        .unwrap_or("no new commit was created")
+                );
+            }
             if success && settings.create_pr {
                 match create_pull_request(Path::new(&run.working_dir)).await {
                     Ok(pr_url) => {
@@ -791,6 +838,9 @@ async fn complete_started_automation_run(
             write_run_output_log(&log_path, &output).context_with(|| {
                 format!("failed to write automation log {}", log_path.display())
             })?;
+            let commit_evaluation =
+                evaluate_commit_outcome(Path::new(&run.working_dir), &commit_baseline);
+            run = update_run_commit_outcome(store, run, &commit_evaluation).await?;
             release_claim_if_needed(
                 store,
                 ClaimReleaseContext {
@@ -1186,6 +1236,9 @@ async fn create_run(
         prompt_path: Set(None),
         agent_model: Set(None),
         agent_reasoning_effort: Set(None),
+        commit_required: Set(false),
+        commit_outcome: Set(AgentCommitOutcome::NotEvaluated.as_storage().to_owned()),
+        commit_shas: Set("[]".to_owned()),
         pr_requested: Set(false),
         pr_url: Set(None),
         cleanup_status: Set("not_applicable".to_owned()),
@@ -1226,6 +1279,7 @@ async fn update_run_launch_details(
     active.agent_reasoning_effort = Set(details
         .agent_reasoning_effort
         .map(|effort| effort.as_storage().to_owned()));
+    active.commit_required = Set(details.commit_required);
     active.pr_requested = Set(details.pr_requested);
     active.cleanup_status = Set(if has_worktree {
         "pending".to_owned()
@@ -1291,6 +1345,24 @@ async fn update_run_process_id(
         .update(store.db().as_ref())
         .await
         .context("failed to update agent run process id")?;
+    publish_run_model_event(store, &updated).await;
+    Ok(updated)
+}
+
+async fn update_run_commit_outcome(
+    store: &Store,
+    run: AgentRunModel,
+    evaluation: &CommitOutcomeEvaluation,
+) -> Result<AgentRunModel> {
+    let mut active: AgentRunActiveModel = run.into();
+    active.commit_outcome = Set(evaluation.outcome.as_storage().to_owned());
+    active.commit_shas = Set(serde_json::to_string(&evaluation.shas)
+        .context("failed to encode automation commit SHAs")?);
+    active.updated_at = Set(utc_now());
+    let updated = active
+        .update(store.db().as_ref())
+        .await
+        .context("failed to update agent run commit outcome")?;
     publish_run_model_event(store, &updated).await;
     Ok(updated)
 }
@@ -1424,6 +1496,254 @@ fn effective_agent_reasoning_effort(
 ) -> Option<AgentReasoningEffort> {
     item.and_then(|item| item.agent_reasoning_effort_override)
         .or(settings.default_agent_reasoning_effort)
+}
+
+fn commit_required_for_policy(settings: &ProjectSettingsView) -> bool {
+    match settings.workspace_mode {
+        WorkspaceMode::CurrentBranch => settings.auto_commit,
+        WorkspaceMode::GitBranch | WorkspaceMode::GitWorktree => true,
+    }
+}
+
+fn capture_commit_baseline(path: &Path, required: bool) -> CommitBaseline {
+    CommitBaseline {
+        required,
+        inspection: inspect_git_workspace(path).map_err(|err| format!("{err:#}")),
+    }
+}
+
+fn evaluate_commit_outcome(path: &Path, baseline: &CommitBaseline) -> CommitOutcomeEvaluation {
+    let initial = match &baseline.inspection {
+        Ok(inspection) => inspection,
+        Err(err) => {
+            return CommitOutcomeEvaluation {
+                outcome: AgentCommitOutcome::Unknown,
+                shas: Vec::new(),
+                detail: Some(format!("failed to inspect git before launch: {err}")),
+                validation_failed: false,
+            };
+        }
+    };
+    let final_inspection = match inspect_git_workspace(path) {
+        Ok(inspection) => inspection,
+        Err(err) => {
+            return CommitOutcomeEvaluation {
+                outcome: AgentCommitOutcome::Unknown,
+                shas: Vec::new(),
+                detail: Some(format!("failed to inspect git after run: {err:#}")),
+                validation_failed: false,
+            };
+        }
+    };
+
+    let (initial_snapshot, final_snapshot) = match (initial, &final_inspection) {
+        (GitInspection::NoRepository, GitInspection::NoRepository) => {
+            return CommitOutcomeEvaluation {
+                outcome: AgentCommitOutcome::SkippedNoGitRepo,
+                shas: Vec::new(),
+                detail: Some("workspace is not a git repository".to_owned()),
+                validation_failed: false,
+            };
+        }
+        (GitInspection::Repository(_), GitInspection::NoRepository) => {
+            return CommitOutcomeEvaluation {
+                outcome: AgentCommitOutcome::SkippedNoGitRepo,
+                shas: Vec::new(),
+                detail: Some("workspace git repository is no longer available".to_owned()),
+                validation_failed: false,
+            };
+        }
+        (GitInspection::NoRepository, GitInspection::Repository(final_snapshot)) => {
+            (None, final_snapshot)
+        }
+        (
+            GitInspection::Repository(initial_snapshot),
+            GitInspection::Repository(final_snapshot),
+        ) => (Some(initial_snapshot), final_snapshot),
+    };
+
+    let initial_head = initial_snapshot.and_then(|snapshot| snapshot.head);
+    let commit_shas = match commit_shas_after(path, initial_head, final_snapshot.head) {
+        Ok(commit_shas) => commit_shas,
+        Err(err) => {
+            return CommitOutcomeEvaluation {
+                outcome: AgentCommitOutcome::Unknown,
+                shas: Vec::new(),
+                detail: Some(format!("failed to list commits created by run: {err:#}")),
+                validation_failed: false,
+            };
+        }
+    };
+    if !commit_shas.is_empty() {
+        return CommitOutcomeEvaluation {
+            outcome: AgentCommitOutcome::Committed,
+            shas: commit_shas,
+            detail: None,
+            validation_failed: false,
+        };
+    }
+
+    let initial_status = initial_snapshot
+        .map(|snapshot| snapshot.status.as_slice())
+        .unwrap_or(&[]);
+    let status_changed = initial_status != final_snapshot.status.as_slice();
+    if !status_changed {
+        return CommitOutcomeEvaluation {
+            outcome: AgentCommitOutcome::SkippedNoChanges,
+            shas: Vec::new(),
+            detail: Some("no new commits or workspace changes were detected".to_owned()),
+            validation_failed: false,
+        };
+    }
+
+    if baseline.required {
+        CommitOutcomeEvaluation {
+            outcome: AgentCommitOutcome::MissingRequired,
+            shas: Vec::new(),
+            detail: Some(
+                "workspace has uncommitted changes and no new commit was created".to_owned(),
+            ),
+            validation_failed: true,
+        }
+    } else {
+        CommitOutcomeEvaluation {
+            outcome: AgentCommitOutcome::NotRequired,
+            shas: Vec::new(),
+            detail: Some("commit was not required by the project policy".to_owned()),
+            validation_failed: false,
+        }
+    }
+}
+
+fn inspect_git_workspace(path: &Path) -> Result<GitInspection> {
+    let repo = match Repository::discover(path) {
+        Ok(repo) => repo,
+        Err(err) if err.code() == GitErrorCode::NotFound => {
+            return Ok(GitInspection::NoRepository);
+        }
+        Err(err) => {
+            bail!(
+                "failed to open git repository for '{}': {err}",
+                path.display()
+            );
+        }
+    };
+    Ok(GitInspection::Repository(git_snapshot(&repo)?))
+}
+
+fn git_snapshot(repo: &Repository) -> Result<GitSnapshot> {
+    let head = match repo.head() {
+        Ok(head) => Some(
+            head.peel_to_commit()
+                .context("repository HEAD does not point to a commit")?
+                .id(),
+        ),
+        Err(err)
+            if matches!(
+                err.code(),
+                GitErrorCode::UnbornBranch | GitErrorCode::NotFound
+            ) =>
+        {
+            None
+        }
+        Err(err) => {
+            bail!("failed to read repository HEAD: {err}");
+        }
+    };
+    Ok(GitSnapshot {
+        head,
+        status: git_status_fingerprint(repo)?,
+    })
+}
+
+fn git_status_fingerprint(repo: &Repository) -> Result<Vec<String>> {
+    let mut status_options = StatusOptions::new();
+    status_options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true);
+    let statuses = repo
+        .statuses(Some(&mut status_options))
+        .context("failed to read git status")?;
+    let index = repo.index().context("failed to read git index")?;
+    let workdir = repo.workdir().map(Path::to_path_buf);
+    let mut entries = statuses
+        .iter()
+        .map(|entry| {
+            let path = entry.path().unwrap_or("(unknown)");
+            let index_oid = index
+                .get_path(Path::new(path), 0)
+                .map(|entry| entry.id.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            let worktree_hash = workdir
+                .as_deref()
+                .and_then(|workdir| worktree_path_fingerprint(workdir, path))
+                .unwrap_or_else(|| "-".to_owned());
+            format!(
+                "{:?}:{}:index={}:worktree={}",
+                entry.status(),
+                path,
+                index_oid,
+                worktree_hash
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    Ok(entries)
+}
+
+fn worktree_path_fingerprint(workdir: &Path, relative_path: &str) -> Option<String> {
+    let path = workdir.join(relative_path);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return fs::read_link(&path)
+            .ok()
+            .map(|target| format!("symlink:{}", target.display()));
+    }
+    if metadata.is_file() {
+        let bytes = fs::read(&path).ok()?;
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        return Some(format!("file:{:016x}", hasher.finish()));
+    }
+    if metadata.is_dir() {
+        return Some("dir".to_owned());
+    }
+    Some("special".to_owned())
+}
+
+fn commit_shas_after(
+    path: &Path,
+    initial_head: Option<Oid>,
+    final_head: Option<Oid>,
+) -> Result<Vec<String>> {
+    let Some(final_head) = final_head else {
+        return Ok(Vec::new());
+    };
+    if Some(final_head) == initial_head {
+        return Ok(Vec::new());
+    }
+
+    let repo = Repository::discover(path)
+        .context_with(|| format!("failed to open git repository for '{}'", path.display()))?;
+    let mut revwalk = repo.revwalk().context("failed to create git revwalk")?;
+    revwalk
+        .push(final_head)
+        .context("failed to add final HEAD to git revwalk")?;
+    if let Some(initial_head) = initial_head {
+        revwalk
+            .hide(initial_head)
+            .context("failed to hide baseline HEAD in git revwalk")?;
+    }
+    revwalk
+        .set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)
+        .context("failed to configure git revwalk sorting")?;
+    revwalk
+        .map(|oid| -> Result<String> {
+            Ok(oid
+                .context("failed to read commit id from git revwalk")?
+                .to_string())
+        })
+        .collect()
 }
 
 fn to_codex_reasoning(effort: AgentReasoningEffort) -> CodexReasoningEffort {
@@ -2665,6 +2985,9 @@ fn model_to_view(run: AgentRunModel) -> Result<AgentRunView> {
             .as_deref()
             .map(str::parse::<AgentReasoningEffort>)
             .transpose()?,
+        commit_required: run.commit_required,
+        commit_outcome: AgentCommitOutcome::from_str(&run.commit_outcome)?,
+        commit_shas: parse_commit_shas(&run.commit_shas)?,
         pr_requested: run.pr_requested,
         pr_url: run.pr_url,
         cleanup_status: run.cleanup_status,
@@ -2675,6 +2998,13 @@ fn model_to_view(run: AgentRunModel) -> Result<AgentRunView> {
         created_at: run.created_at,
         updated_at: run.updated_at,
     })
+}
+
+fn parse_commit_shas(raw: &str) -> Result<Vec<String>> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str(raw).context("failed to decode automation commit SHAs")?)
 }
 
 #[cfg(test)]
@@ -2688,6 +3018,29 @@ mod tests {
             CreateProject, UpdateProjectSettings, create_project, get_project, update_settings,
         },
     };
+
+    fn commit_all(repo: &Repository, message: &str) -> String {
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Patchbay Test", "patchbay@example.com").unwrap();
+        let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+        let parents = parent.iter().collect::<Vec<_>>();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parents,
+        )
+        .unwrap()
+        .to_string()
+    }
 
     async fn test_store() -> (TempDir, Store) {
         let temp = TempDir::new().unwrap();
@@ -2753,6 +3106,99 @@ mod tests {
         assert_eq!(plan.working_dir, temp.path());
         assert!(plan.worktree_path.is_none());
         assert!(plan.branch_name.is_none());
+    }
+
+    #[test]
+    fn commit_outcome_skips_when_workspace_is_not_git_repo() {
+        let temp = TempDir::new().unwrap();
+        let baseline = capture_commit_baseline(temp.path(), true);
+
+        let evaluation = evaluate_commit_outcome(temp.path(), &baseline);
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::SkippedNoGitRepo);
+        assert!(evaluation.shas.is_empty());
+        assert!(!evaluation.validation_failed);
+    }
+
+    #[test]
+    fn commit_outcome_skips_when_no_commit_or_workspace_change_exists() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("README.md"), "initial\n").unwrap();
+        commit_all(&repo, "Initial commit");
+        let baseline = capture_commit_baseline(temp.path(), true);
+
+        let evaluation = evaluate_commit_outcome(temp.path(), &baseline);
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::SkippedNoChanges);
+        assert!(evaluation.shas.is_empty());
+        assert!(!evaluation.validation_failed);
+    }
+
+    #[test]
+    fn commit_outcome_records_created_commits() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("README.md"), "initial\n").unwrap();
+        commit_all(&repo, "Initial commit");
+        let baseline = capture_commit_baseline(temp.path(), true);
+        fs::write(temp.path().join("README.md"), "initial\nchanged\n").unwrap();
+        let created_sha = commit_all(&repo, "Update README");
+
+        let evaluation = evaluate_commit_outcome(temp.path(), &baseline);
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::Committed);
+        assert_eq!(evaluation.shas, vec![created_sha]);
+        assert!(!evaluation.validation_failed);
+    }
+
+    #[test]
+    fn commit_outcome_fails_validation_when_required_commit_is_missing() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("README.md"), "initial\n").unwrap();
+        commit_all(&repo, "Initial commit");
+        let baseline = capture_commit_baseline(temp.path(), true);
+        fs::write(temp.path().join("README.md"), "initial\nchanged\n").unwrap();
+
+        let evaluation = evaluate_commit_outcome(temp.path(), &baseline);
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::MissingRequired);
+        assert!(evaluation.shas.is_empty());
+        assert!(evaluation.validation_failed);
+    }
+
+    #[test]
+    fn commit_outcome_detects_changes_to_preexisting_dirty_file() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("README.md"), "initial\n").unwrap();
+        commit_all(&repo, "Initial commit");
+        fs::write(temp.path().join("README.md"), "dirty before launch\n").unwrap();
+        let baseline = capture_commit_baseline(temp.path(), true);
+        fs::write(temp.path().join("README.md"), "dirty after launch\n").unwrap();
+
+        let evaluation = evaluate_commit_outcome(temp.path(), &baseline);
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::MissingRequired);
+        assert!(evaluation.shas.is_empty());
+        assert!(evaluation.validation_failed);
+    }
+
+    #[test]
+    fn commit_outcome_allows_uncommitted_changes_when_commit_is_not_required() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        fs::write(temp.path().join("README.md"), "initial\n").unwrap();
+        commit_all(&repo, "Initial commit");
+        let baseline = capture_commit_baseline(temp.path(), false);
+        fs::write(temp.path().join("README.md"), "initial\nchanged\n").unwrap();
+
+        let evaluation = evaluate_commit_outcome(temp.path(), &baseline);
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::NotRequired);
+        assert!(evaluation.shas.is_empty());
+        assert!(!evaluation.validation_failed);
     }
 
     #[tokio::test]
@@ -3081,6 +3527,7 @@ mod tests {
                 memory_event_id: None,
                 agent_model: None,
                 agent_reasoning_effort: None,
+                commit_required: false,
                 pr_requested: false,
             },
         )

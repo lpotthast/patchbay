@@ -28,7 +28,7 @@ The main workflow surface should make these states easy to inspect:
 - recent comments and progress;
 - automation status;
 - stale or blocked work;
-- run logs and run outcomes.
+- run logs and run outcomes, including commit outcome and created commit SHA visibility.
 - Patchbay-owned workflow labels such as `state`, `patchbay:claimed-from-state`, and `patchbay:automation-blocked`.
 
 Board and item-detail interactions call server actions or custom API endpoints so workflow rules remain centralized.

@@ -101,6 +101,18 @@ pub struct Model {
 
     #[ck_create_model(exclude)]
     #[ck_update_model(exclude)]
+    pub commit_required: bool,
+
+    #[ck_create_model(exclude)]
+    #[ck_update_model(exclude)]
+    pub commit_outcome: String,
+
+    #[ck_create_model(exclude)]
+    #[ck_update_model(exclude)]
+    pub commit_shas: String,
+
+    #[ck_create_model(exclude)]
+    #[ck_update_model(exclude)]
     pub pr_requested: bool,
 
     #[ck_create_model(exclude)]

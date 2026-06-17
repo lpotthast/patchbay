@@ -32,13 +32,14 @@ use crate::{
         },
     },
     shared::view_models::{
-        AUTOMATION_BLOCKED_LABEL_KEY, AgentGitHardResetPolicy, AgentReasoningEffort,
-        AgentRunOutputKind, AgentRunOutputPiece, AgentRunStatus, AgentRunView, AuthorType,
-        AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, CodexAgentModel,
-        CodexAppServerStatusView, CodexAuthSetupView, CodexRateLimitView, CodexUsageSummaryView,
-        CommentView, ProjectLabelView, ProjectMemoryEventRefView, ProjectMemoryEventView,
-        ProjectSettingsView, ProjectView, RevertStrategy, RunLogView, STATE_LABEL_KEY,
-        SwimLaneView, UiEvent, WorkItemLabelView, WorkItemStateView, WorkItemView, WorkspaceMode,
+        AUTOMATION_BLOCKED_LABEL_KEY, AgentCommitOutcome, AgentGitHardResetPolicy,
+        AgentReasoningEffort, AgentRunOutputKind, AgentRunOutputPiece, AgentRunStatus,
+        AgentRunView, AuthorType, AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY,
+        CodexAgentModel, CodexAppServerStatusView, CodexAuthSetupView, CodexRateLimitView,
+        CodexUsageSummaryView, CommentView, ProjectLabelView, ProjectMemoryEventRefView,
+        ProjectMemoryEventView, ProjectSettingsView, ProjectView, RevertStrategy, RunLogView,
+        STATE_LABEL_KEY, SwimLaneView, UiEvent, WorkItemLabelView, WorkItemStateView, WorkItemView,
+        WorkspaceMode,
     },
 };
 #[cfg(not(feature = "ssr"))]
@@ -2078,6 +2079,7 @@ fn run_log_content(page: RunLogPage) -> AnyView {
     let working_dir = run_workspace_actions(&project, &run_log.run, run_href);
     let status_class = run_status_class(run_log.run.status);
     let memory_event = run_log.memory_event.as_ref().map(memory_event_ref_label);
+    let commit_outcome = run_commit_outcome_label(&run_log.run);
     let pr_url = run_log.run.pr_url.clone().map(|pr_url| {
         let href = pr_url.clone();
         view! {
@@ -2124,6 +2126,8 @@ fn run_log_content(page: RunLogPage) -> AnyView {
                         <dd>{working_dir}</dd>
                         <dt>"cleanup"</dt>
                         <dd>{run_log.run.cleanup_status}</dd>
+                        <dt>"commit"</dt>
+                        <dd>{commit_outcome}</dd>
                         {memory_event.map(|memory_event| view! {
                             <>
                                 <dt>"memory"</dt>
@@ -4875,6 +4879,36 @@ fn run_result_summary(run: &AgentRunView) -> String {
     } else {
         run.result_summary.clone()
     }
+}
+
+fn run_commit_outcome_label(run: &AgentRunView) -> String {
+    let requirement = if run.commit_required {
+        "required"
+    } else {
+        "not required"
+    };
+    let base = match run.commit_outcome {
+        AgentCommitOutcome::NotEvaluated => "not evaluated".to_owned(),
+        AgentCommitOutcome::NotRequired => "not required by policy".to_owned(),
+        AgentCommitOutcome::Committed => {
+            if run.commit_shas.is_empty() {
+                "committed".to_owned()
+            } else {
+                let shas = run
+                    .commit_shas
+                    .iter()
+                    .map(|sha| sha.chars().take(12).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("committed {shas}")
+            }
+        }
+        AgentCommitOutcome::SkippedNoChanges => "skipped: no changes".to_owned(),
+        AgentCommitOutcome::SkippedNoGitRepo => "skipped: no git repository".to_owned(),
+        AgentCommitOutcome::MissingRequired => "missing required commit".to_owned(),
+        AgentCommitOutcome::Unknown => "unknown".to_owned(),
+    };
+    format!("{base} ({requirement})")
 }
 
 fn run_origin_label(run: &AgentRunView) -> Option<String> {

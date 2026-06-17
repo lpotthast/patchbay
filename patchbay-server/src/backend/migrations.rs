@@ -162,6 +162,9 @@ enum AgentRuns {
     PromptPath,
     AgentModel,
     AgentReasoningEffort,
+    CommitRequired,
+    CommitOutcome,
+    CommitShas,
     PrRequested,
     PrUrl,
     CleanupStatus,
@@ -235,6 +238,7 @@ impl MigratorTrait for Migrator {
             Box::new(DecoupleStatesAndSwimLanes),
             Box::new(AddProjectCommitPolicy),
             Box::new(AddProjectAgentGitCommandPolicy),
+            Box::new(AddAutomationRunCommitOutcomes),
         ]
     }
 }
@@ -864,6 +868,24 @@ async fn create_agent_runs(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                     ColumnDef::new(AgentRuns::AgentReasoningEffort)
                         .string()
                         .null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRuns::CommitRequired)
+                        .boolean()
+                        .not_null()
+                        .default(false),
+                )
+                .col(
+                    ColumnDef::new(AgentRuns::CommitOutcome)
+                        .string()
+                        .not_null()
+                        .default("not_evaluated"),
+                )
+                .col(
+                    ColumnDef::new(AgentRuns::CommitShas)
+                        .text()
+                        .not_null()
+                        .default("[]"),
                 )
                 .col(
                     ColumnDef::new(AgentRuns::PrRequested)
@@ -2118,6 +2140,51 @@ impl MigrationTrait for AddProjectAgentGitCommandPolicy {
         drop_read_view(manager, "projects_read_view").await?;
         drop_column_if_present(manager, "projects", "agent_git_command_policy").await?;
         create_read_view(manager, "projects", "projects_read_view").await
+    }
+}
+
+struct AddAutomationRunCommitOutcomes;
+
+impl MigrationName for AddAutomationRunCommitOutcomes {
+    fn name(&self) -> &str {
+        "m20260617_000028_add_automation_run_commit_outcomes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAutomationRunCommitOutcomes {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "agent_runs_read_view").await?;
+        add_column_if_missing(
+            manager,
+            "agent_runs",
+            "commit_required",
+            "BOOLEAN NOT NULL DEFAULT 0",
+        )
+        .await?;
+        add_column_if_missing(
+            manager,
+            "agent_runs",
+            "commit_outcome",
+            "TEXT NOT NULL DEFAULT 'not_evaluated'",
+        )
+        .await?;
+        add_column_if_missing(
+            manager,
+            "agent_runs",
+            "commit_shas",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        .await?;
+        create_read_view(manager, "agent_runs", "agent_runs_read_view").await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "agent_runs_read_view").await?;
+        drop_column_if_present(manager, "agent_runs", "commit_shas").await?;
+        drop_column_if_present(manager, "agent_runs", "commit_outcome").await?;
+        drop_column_if_present(manager, "agent_runs", "commit_required").await?;
+        create_read_view(manager, "agent_runs", "agent_runs_read_view").await
     }
 }
 

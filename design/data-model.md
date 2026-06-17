@@ -81,6 +81,7 @@ Run data includes:
 - process id and exit code;
 - log path and prompt path;
 - selected agent model and reasoning effort;
+- commit policy outcome: whether a commit was required, the commit outcome status, and created commit SHA(s);
 - pull request request and URL fields;
 - cleanup status;
 - timestamps.

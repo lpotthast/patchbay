@@ -4,8 +4,8 @@ use clap::{Args, Parser, Subcommand};
 use patchbay_api_client::PatchbayClient;
 use patchbay_types::{
     AddCommentRequest, AgentGitRuntimePolicy, AgentReasoningEffort, AgentRunOutputPiece,
-    AuthorType, ClaimWorkItemRequest, CreateWorkItemLabelRequest, CreateWorkItemRequest,
-    FinishWorkItemRequest, ProgressWorkItemRequest, ReleaseWorkItemRequest,
+    AgentRunView, AuthorType, ClaimWorkItemRequest, CreateWorkItemLabelRequest,
+    CreateWorkItemRequest, FinishWorkItemRequest, ProgressWorkItemRequest, ReleaseWorkItemRequest,
     UpdateProjectMemoryRequest, UpdateWorkItemLabelRequest, UpdateWorkItemRequest, WorkItemView,
 };
 use rootcause::{Result, option_ext::OptionExt, prelude::*};
@@ -882,6 +882,7 @@ async fn run_automation(command: AutomationCommand, context: ResolvedContext) ->
             output(args.json, &log, || {
                 println!("run #{} {}", log.run.id, log.run.status);
                 println!("summary: {}", log.run.result_summary);
+                println!("commit: {}", run_commit_outcome_text(&log.run));
                 println!();
                 println!("output:");
                 print_output_pieces(&log.output);
@@ -1120,6 +1121,32 @@ fn format_label(key: &str, value: Option<&str>) -> String {
         Some(value) => format!("{key}={value}"),
         None => key.to_owned(),
     }
+}
+
+fn run_commit_outcome_text(run: &AgentRunView) -> String {
+    let requirement = if run.commit_required {
+        "required"
+    } else {
+        "not required"
+    };
+    let base = match run.commit_outcome {
+        patchbay_types::AgentCommitOutcome::NotEvaluated => "not evaluated".to_owned(),
+        patchbay_types::AgentCommitOutcome::NotRequired => "not required by policy".to_owned(),
+        patchbay_types::AgentCommitOutcome::Committed => {
+            if run.commit_shas.is_empty() {
+                "committed".to_owned()
+            } else {
+                format!("committed {}", run.commit_shas.join(", "))
+            }
+        }
+        patchbay_types::AgentCommitOutcome::SkippedNoChanges => "skipped: no changes".to_owned(),
+        patchbay_types::AgentCommitOutcome::SkippedNoGitRepo => {
+            "skipped: no git repository".to_owned()
+        }
+        patchbay_types::AgentCommitOutcome::MissingRequired => "missing required commit".to_owned(),
+        patchbay_types::AgentCommitOutcome::Unknown => "unknown".to_owned(),
+    };
+    format!("{base} ({requirement})")
 }
 
 fn print_output_pieces(output: &[AgentRunOutputPiece]) {

@@ -152,6 +152,7 @@ mod tests {
             "m20260617_000025_decouple_states_and_swim_lanes",
             "m20260617_000026_add_project_commit_policy",
             "m20260617_000027_add_project_agent_git_command_policy",
+            "m20260617_000028_add_automation_run_commit_outcomes",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());
