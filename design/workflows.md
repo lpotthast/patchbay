@@ -98,6 +98,14 @@ Project settings choose the workspace policy:
 
 When worktrees or branches are used, run records capture the working directory, branch, and cleanup status. Cleanup can be manual or automatic after successful runs, depending on project settings.
 
+## Commit And Revert Policy
+
+Project settings define an automation commit policy. `auto_commit` defaults to on and controls whether current-branch runs are instructed to commit completed work before finishing. Agents generate the commit message from the completed diff and follow the project commit standard text when it is configured, otherwise they infer the repository's existing commit style.
+
+Current-branch runs are instructed to inspect the initial git status, commit completed work only when auto-commit is enabled, and revert their own changes before releasing incomplete work. The current-branch failure revert strategy defaults to manual revert and can be changed to Git reset for projects that intentionally allow that more destructive cleanup path.
+
+Git branch and Git worktree runs are always instructed to commit before ending the run. If the work is incomplete in those modes, agents commit useful partial work and release the item with an explanation instead of reverting the workspace, because the isolated branch or worktree preserves context for follow-up work without polluting the base workspace.
+
 ## Stale Claims
 
 Projects define a stale-claim timeout. Server maintenance can recover expired claims by clearing ownership and making the item available again.

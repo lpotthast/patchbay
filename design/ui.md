@@ -67,11 +67,18 @@ Project settings should expose:
 - agent concurrency;
 - refinement policy;
 - pull request creation;
+- current-branch auto-commit behavior;
+- commit standard text for generated agent commit messages;
+- current-branch failure revert strategy;
 - stale-claim timeout;
 - worktree cleanup policy;
 - default agent tool, model, and reasoning effort.
 
 Settings changes should go through server handlers and be reflected in automation launches without requiring agents to know settings internals.
+
+When a selected project uses the current-branch workspace mode, the top bar should include an Auto-Commit toggle next to the automation Start/Stop control so operators can quickly decide whether completed current-branch work should be committed by the agent.
+
+Quick settings controls such as the top-bar Auto-Commit toggle should update optimistically in the hydrated UI and send the persistence request in the background. If the request fails, the control should roll back to its previous state instead of navigating or reloading the page.
 
 The board and run detail views should make workspaces directly reachable. Project-level actions use the configured project path; run-level actions use the recorded run working directory so Git worktree runs can be opened in the exact folder the agent edited. IDE opening is a server-local action controlled by `PATCHBAY_WORKSPACE_IDE` and must not accept arbitrary commands from browser requests.
 

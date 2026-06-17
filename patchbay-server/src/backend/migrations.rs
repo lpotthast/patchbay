@@ -30,6 +30,9 @@ enum Projects {
     MaxCodeEditAgents,
     AllowRefinementAgentsDuringEditing,
     CreatePr,
+    AutoCommit,
+    CommitStandard,
+    RevertStrategy,
     StaleClaimMinutes,
     WorktreeCleanupPolicy,
     DefaultAgentTool,
@@ -226,6 +229,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddProjectAgentExtraWritableRoots),
             Box::new(AddProjectAgentSandboxMode),
             Box::new(DecoupleStatesAndSwimLanes),
+            Box::new(AddProjectCommitPolicy),
         ]
     }
 }
@@ -396,6 +400,24 @@ async fn create_projects(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                         .boolean()
                         .not_null()
                         .default(false),
+                )
+                .col(
+                    ColumnDef::new(Projects::AutoCommit)
+                        .boolean()
+                        .not_null()
+                        .default(true),
+                )
+                .col(
+                    ColumnDef::new(Projects::CommitStandard)
+                        .text()
+                        .not_null()
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Projects::RevertStrategy)
+                        .string()
+                        .not_null()
+                        .default("manual"),
                 )
                 .col(
                     ColumnDef::new(Projects::StaleClaimMinutes)
@@ -2030,6 +2052,31 @@ impl MigrationTrait for DecoupleStatesAndSwimLanes {
     }
 }
 
+struct AddProjectCommitPolicy;
+
+impl MigrationName for AddProjectCommitPolicy {
+    fn name(&self) -> &str {
+        "m20260617_000026_add_project_commit_policy"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddProjectCommitPolicy {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "projects_read_view").await?;
+        add_project_commit_policy_columns(manager).await?;
+        create_read_view(manager, "projects", "projects_read_view").await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "projects_read_view").await?;
+        drop_column_if_present(manager, "projects", "revert_strategy").await?;
+        drop_column_if_present(manager, "projects", "commit_standard").await?;
+        drop_column_if_present(manager, "projects", "auto_commit").await?;
+        create_read_view(manager, "projects", "projects_read_view").await
+    }
+}
+
 async fn seed_default_work_item_automations(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .get_connection()
@@ -2627,6 +2674,30 @@ async fn add_project_run_settings_columns(manager: &SchemaManager<'_>) -> Result
         "projects",
         "agent_extra_writable_roots",
         "TEXT NOT NULL DEFAULT ''",
+    )
+    .await
+}
+
+async fn add_project_commit_policy_columns(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    add_column_if_missing(
+        manager,
+        "projects",
+        "auto_commit",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    .await?;
+    add_column_if_missing(
+        manager,
+        "projects",
+        "commit_standard",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    add_column_if_missing(
+        manager,
+        "projects",
+        "revert_strategy",
+        "TEXT NOT NULL DEFAULT 'manual'",
     )
     .await
 }

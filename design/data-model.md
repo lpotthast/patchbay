@@ -114,6 +114,9 @@ Project settings control automation behavior:
 - maximum concurrent code-edit agents;
 - whether refinement agents can run while editing agents are active;
 - pull request creation;
+- auto-commit behavior for current-branch automation;
+- commit standard text used in generated agent commit instructions;
+- failure revert strategy for current-branch automation: manual revert or Git reset;
 - stale-claim timeout;
 - worktree cleanup policy;
 - default agent tool, model, and reasoning effort.

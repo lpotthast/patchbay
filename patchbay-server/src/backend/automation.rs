@@ -37,7 +37,7 @@ use crate::{
         AgentRunOutputPiece, AgentRunStatus, AgentRunView, AgentSandboxMode, AgentToolName,
         AutomationMode, AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL,
         FINISHED_STATE_LABEL, ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView,
-        RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
+        RevertStrategy, RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -96,6 +96,10 @@ struct PromptContext<'a> {
     item: Option<&'a WorkItemView>,
     agent_id: &'a str,
     extra_prompt: Option<&'a str>,
+    workspace_mode: WorkspaceMode,
+    auto_commit: bool,
+    commit_standard: &'a str,
+    revert_strategy: RevertStrategy,
     create_pr: bool,
 }
 
@@ -571,6 +575,10 @@ async fn complete_started_automation_run(
         item: claimed_item.as_ref(),
         agent_id: &agent_id,
         extra_prompt: start.extra_prompt.as_deref(),
+        workspace_mode: settings.workspace_mode,
+        auto_commit: settings.auto_commit,
+        commit_standard: &settings.commit_standard,
+        revert_strategy: settings.revert_strategy,
         create_pr: settings.create_pr,
     });
     if let Err(err) = fs::write(&prompt_path, prompt)
@@ -1861,6 +1869,70 @@ fn build_prompt(context: PromptContext<'_>) -> String {
             item.description
         ));
     }
+    prompt.push_str("## Git Commit And Revert Policy\n\n");
+    prompt.push_str(&format!("Workspace mode: {}\n", context.workspace_mode));
+    match context.workspace_mode {
+        WorkspaceMode::CurrentBranch => {
+            prompt.push_str(&format!(
+                "Auto-commit: {}\n",
+                if context.auto_commit { "on" } else { "off" }
+            ));
+            prompt.push_str(&format!(
+                "Failure revert strategy: {}\n\n",
+                context.revert_strategy
+            ));
+            prompt.push_str(
+                "- At the start of work, inspect `git status --short` so you can distinguish pre-existing changes from your own changes.\n",
+            );
+            if context.auto_commit {
+                prompt.push_str(
+                    "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
+                );
+                prompt.push_str(
+                    "- Generate the commit message from the completed diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
+                );
+                prompt.push_str(
+                    "- If the project is not a git repository or there are no file changes to commit, say that in the finish report instead of inventing a commit.\n",
+                );
+            } else {
+                prompt.push_str(
+                    "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report.\n",
+                );
+            }
+            prompt.push_str(&format!(
+                "- If the work cannot be completed, revert all changes you made using the `{}` strategy before calling `patchbay item release --comment ...`.\n",
+                context.revert_strategy
+            ));
+            prompt.push_str(current_branch_revert_instruction(context.revert_strategy));
+        }
+        WorkspaceMode::GitBranch | WorkspaceMode::GitWorktree => {
+            prompt.push_str(
+                "Auto-commit: always on for this workspace mode\nFailure revert strategy: not applicable\n\n",
+            );
+            prompt.push_str(
+                "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
+            );
+            prompt.push_str(
+                "- If the work cannot be completed, do not revert partial changes solely because the work is incomplete. Commit the useful partial work and then call `patchbay item release --comment ...` with what you tried and what remains.\n",
+            );
+            prompt.push_str(
+                "- If there are no file changes to commit, explain that in the finish or release report.\n",
+            );
+            prompt.push_str(
+                "- Generate commit messages from the diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
+            );
+        }
+    }
+    prompt.push('\n');
+    prompt.push_str("Commit standard:\n");
+    if context.commit_standard.trim().is_empty() {
+        prompt.push_str(
+            "(not configured; infer the repository's existing commit message style from recent history)\n\n",
+        );
+    } else {
+        prompt.push_str(context.commit_standard.trim());
+        prompt.push_str("\n\n");
+    }
     if let Some(extra_prompt) = context
         .extra_prompt
         .filter(|value| !value.trim().is_empty())
@@ -1876,6 +1948,17 @@ fn build_prompt(context: PromptContext<'_>) -> String {
         );
     }
     prompt
+}
+
+fn current_branch_revert_instruction(revert_strategy: RevertStrategy) -> &'static str {
+    match revert_strategy {
+        RevertStrategy::Manual => {
+            "- Manual revert means reviewing the diff, restoring edited files by hand, and removing generated files you created while preserving unrelated pre-existing user changes.\n"
+        }
+        RevertStrategy::GitReset => {
+            "- Git reset revert means using git reset/clean commands to return the workspace to the run's starting point. Check for unrelated pre-existing changes first and do not discard them silently.\n"
+        }
+    }
 }
 
 fn claimed_from_state_label(item: &WorkItemView) -> Option<&str> {
@@ -2553,6 +2636,10 @@ mod tests {
             item: Some(&item),
             agent_id: "patchbay-run-1",
             extra_prompt: None,
+            workspace_mode: WorkspaceMode::CurrentBranch,
+            auto_commit: true,
+            commit_standard: "Use short imperative subjects.",
+            revert_strategy: RevertStrategy::Manual,
             create_pr: false,
         });
 
@@ -2596,6 +2683,42 @@ mod tests {
         assert!(!prompt.contains("Model: gpt-5-codex"));
         assert!(!prompt.contains("Reasoning effort: medium"));
         assert!(!prompt.contains("Use the Patchbay CLI for progress and final status"));
+        assert!(prompt.contains("## Git Commit And Revert Policy"));
+        assert!(prompt.contains("Workspace mode: current_branch"));
+        assert!(prompt.contains("Auto-commit: on"));
+        assert!(prompt.contains("Failure revert strategy: manual"));
+        assert!(prompt.contains("create a git commit before calling `patchbay item finish`"));
+        assert!(prompt.contains("revert all changes you made using the `manual` strategy"));
+        assert!(prompt.contains("Use short imperative subjects."));
+    }
+
+    #[test]
+    fn worktree_prompt_commits_incomplete_work_instead_of_reverting() {
+        let prompt = build_prompt(PromptContext {
+            project_name: "demo",
+            mode: AutomationMode::Execute,
+            system_prompt: "",
+            memory: "",
+            memory_event_id: None,
+            item: None,
+            agent_id: "patchbay-run-1",
+            extra_prompt: None,
+            workspace_mode: WorkspaceMode::GitWorktree,
+            auto_commit: false,
+            commit_standard: "",
+            revert_strategy: RevertStrategy::GitReset,
+            create_pr: false,
+        });
+
+        assert!(prompt.contains("Workspace mode: git_worktree"));
+        assert!(prompt.contains("Auto-commit: always on for this workspace mode"));
+        assert!(
+            prompt.contains("do not revert partial changes solely because the work is incomplete")
+        );
+        assert!(prompt.contains("Commit the useful partial work"));
+        assert!(
+            prompt.contains("not configured; infer the repository's existing commit message style")
+        );
     }
 
     #[test]

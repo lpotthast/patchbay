@@ -203,6 +203,15 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         assert_source_contains(driver, "System prompt").await?;
         assert_source_does_not_contain(driver, "project-option-key").await?;
         assert_source_contains(driver, "Memory").await?;
+        assert_source_contains(driver, "Automation policy").await?;
+        assert_source_contains(driver, "Auto-Commit").await?;
+        find(driver, By::Css("#project-auto-commit")).await?;
+        find(driver, By::Css("#project-commit-standard")).await?;
+        find(
+            driver,
+            By::Css("#project-revert-strategy option[value='git_reset']"),
+        )
+        .await?;
         assert_source_contains(driver, "memory history").await?;
         assert_source_does_not_contain(driver, "Compact history").await?;
         assert_source_does_not_contain(driver, "Append memory").await?;
@@ -219,6 +228,8 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         assert_source_does_not_contain(driver, "CrudKit resources").await?;
         find(driver, By::Css(".topbar-codex")).await?;
         assert_source_does_not_contain(driver, "codex-status-panel").await?;
+        find(driver, By::Css(".topbar-auto-commit[role='switch']")).await?;
+        assert_auto_commit_toggle_updates_without_navigation(driver).await?;
         find(driver, By::Css(".topbar-automation button")).await?;
         assert_source_contains(driver, "Stopped").await?;
         assert_source_does_not_contain(driver, "Start automation").await?;
@@ -657,6 +668,77 @@ async fn assert_crudkit_create_form_survives_live_event(driver: &WebDriver) -> R
         .convert::<String>()
         .context("failed to read CrudKit live event result")?;
     assert_that!(result).is_equal_to("ok".to_owned());
+    Ok(())
+}
+
+async fn assert_auto_commit_toggle_updates_without_navigation(
+    driver: &WebDriver,
+) -> Result<(), Report> {
+    let initial = driver
+        .execute(
+            r#"
+            const button = document.querySelector('.topbar-auto-commit[role="switch"]');
+            const checkbox = document.querySelector('#project-auto-commit');
+            window.__patchbayAutoCommitMarker = 'alive';
+            window.__patchbayAutoCommitUrl = window.location.href;
+            return `${button?.getAttribute('aria-checked') ?? 'missing'}|${checkbox?.checked ?? 'missing'}`;
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to inspect initial Auto-Commit state")?
+        .convert::<String>()
+        .context("failed to read initial Auto-Commit state")?;
+    assert_that!(initial).is_equal_to("true|true".to_owned());
+
+    click(driver, By::Css(".topbar-auto-commit[role='switch']")).await?;
+
+    let result = driver
+        .execute_async(
+            r#"
+            const done = arguments[0];
+            const deadline = Date.now() + 5000;
+            async function check() {
+                const button = document.querySelector('.topbar-auto-commit[role="switch"]');
+                const checkbox = document.querySelector('#project-auto-commit');
+                const marker = window.__patchbayAutoCommitMarker;
+                const sameUrl = window.location.href === window.__patchbayAutoCommitUrl;
+                const checked = button?.getAttribute('aria-checked') ?? 'missing';
+                const settingsChecked = checkbox?.checked ?? 'missing';
+                let persisted = 'not checked';
+                try {
+                    const response = await fetch('/api/projects/demo/settings');
+                    persisted = response.ok ? (await response.json()).auto_commit : `status ${response.status}`;
+                } catch (error) {
+                    persisted = String(error);
+                }
+
+                if (
+                    marker === 'alive' &&
+                    sameUrl &&
+                    checked === 'false' &&
+                    settingsChecked === false &&
+                    persisted === false
+                ) {
+                    done('ok');
+                    return;
+                }
+                if (Date.now() > deadline) {
+                    done(`marker=${marker}; sameUrl=${sameUrl}; checked=${checked}; settingsChecked=${settingsChecked}; persisted=${persisted}`);
+                    return;
+                }
+                setTimeout(check, 100);
+            }
+            check();
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to verify Auto-Commit toggle behaviour")?
+        .convert::<String>()
+        .context("failed to read Auto-Commit toggle result")?;
+    assert_that!(result).is_equal_to("ok".to_owned());
+
     Ok(())
 }
 

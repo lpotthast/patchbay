@@ -22,8 +22,8 @@ use crate::{
     },
     shared::view_models::{
         AgentReasoningEffort, AgentSandboxMode, AgentToolName, AutomationActivation,
-        AutomationEffect, CodexAgentModel, DEFAULT_STATE_LABEL, STATE_LABEL_KEY, WorkspaceMode,
-        WorktreeCleanupPolicy,
+        AutomationEffect, CodexAgentModel, DEFAULT_STATE_LABEL, RevertStrategy, STATE_LABEL_KEY,
+        WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -211,6 +211,13 @@ impl CrudLifetime<CrudProjectResource> for ProjectLifetime {
             .parse::<WorktreeCleanupPolicy>()
             .map_err(|err| project_unprocessable_error(err.to_string()))?;
         update_model.worktree_cleanup_policy = worktree_cleanup_policy.as_storage().to_owned();
+        update_model.commit_standard = update_model.commit_standard.trim().to_owned();
+        update_model.revert_strategy = update_model
+            .revert_strategy
+            .parse::<RevertStrategy>()
+            .map_err(|err| project_unprocessable_error(err.to_string()))?
+            .as_storage()
+            .to_owned();
         update_model.default_agent_tool = update_model
             .default_agent_tool
             .parse::<AgentToolName>()

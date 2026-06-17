@@ -314,6 +314,101 @@ a {
   min-width: 0;
 }
 
+.topbar-automation-group {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.topbar-auto-commit-form {
+  margin: 0;
+}
+
+.topbar-auto-commit {
+  display: inline-grid;
+  grid-template-columns: auto 34px 24px;
+  gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  padding: 5px 9px;
+  border: 1px solid $border;
+  border-radius: 8px;
+  background: $surface;
+  color: $ink-soft;
+  font-weight: 760;
+  white-space: nowrap;
+
+  &:hover {
+    border-color: $accent;
+    color: $ink;
+    box-shadow: $shadow-sm;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.78;
+  }
+
+  &.enabled {
+    border-color: rgba($green, 0.28);
+    background: linear-gradient(180deg, $surface 0%, $green-soft 100%);
+    color: $green;
+
+    .auto-commit-track {
+      background: $green;
+    }
+
+    .auto-commit-thumb {
+      transform: translateX(14px);
+    }
+  }
+
+  &.pending {
+    border-color: rgba($accent, 0.32);
+    box-shadow: 0 0 0 2px rgba($accent, 0.08);
+  }
+
+  &.failed {
+    border-color: rgba($danger, 0.36);
+    color: $danger;
+  }
+
+  strong {
+    width: 24px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 850;
+  }
+}
+
+.auto-commit-label {
+  color: $ink;
+}
+
+.auto-commit-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: $border-strong;
+  transition: background 0.16s ease;
+}
+
+.auto-commit-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: $surface;
+  box-shadow: 0 1px 2px rgba(16, 24, 32, 0.22);
+  transition: transform 0.16s ease;
+}
+
 .automation-status {
   display: inline-flex;
   min-height: 28px;
@@ -1352,6 +1447,25 @@ button.link-danger {
   box-shadow: 0 0 0 3px rgba($amber, 0.22);
 }
 
+.commit-policy {
+  .checkbox-row {
+    display: flex;
+    width: fit-content;
+    align-items: center;
+    gap: 8px;
+    color: $ink;
+    font-weight: 720;
+
+    input {
+      width: auto;
+    }
+  }
+
+  textarea {
+    min-height: 112px;
+  }
+}
+
 .actions {
   @include surface;
   display: flex;
@@ -2053,6 +2167,10 @@ dd {
   }
 
   .topbar-automation {
+    justify-content: flex-start;
+  }
+
+  .topbar-automation-group {
     justify-content: flex-start;
   }
 

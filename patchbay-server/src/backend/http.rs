@@ -7,7 +7,7 @@ use axum::{
         Path, Query,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Redirect, Response,
         sse::{Event, KeepAlive, Sse},
@@ -37,7 +37,7 @@ use crate::{
     frontend,
     shared::view_models::{
         AgentReasoningEffort, AgentToolName, AuthorType, AutomationActivation, AutomationEffect,
-        AutomationMode, DEFAULT_STATE_LABEL, ProcessSessionView, WorkspaceMode,
+        AutomationMode, DEFAULT_STATE_LABEL, ProcessSessionView, RevertStrategy, WorkspaceMode,
         WorktreeCleanupPolicy,
     },
 };
@@ -113,6 +113,14 @@ pub(crate) fn router(
             post(compact_memory_events),
         )
         .route("/projects/{project}/settings", post(update_settings))
+        .route(
+            "/projects/{project}/settings/auto-commit",
+            post(update_auto_commit),
+        )
+        .route(
+            "/projects/{project}/settings/commit-policy",
+            post(update_commit_policy),
+        )
         .route(
             "/projects/{project}/workspace/open",
             post(open_project_workspace),
@@ -540,6 +548,9 @@ struct UpdateSettingsForm {
     max_code_edit_agents: i64,
     allow_refinement_agents_during_editing: Option<String>,
     create_pr: Option<String>,
+    auto_commit: Option<String>,
+    commit_standard: Option<String>,
+    revert_strategy: Option<String>,
     stale_claim_minutes: i64,
     worktree_cleanup_policy: String,
     default_agent_tool: String,
@@ -564,6 +575,13 @@ async fn update_settings(
     {
         Ok(value) => value,
         Err(err) => return error_response(err).await,
+    };
+    let revert_strategy = match form.revert_strategy {
+        Some(value) => match value.parse::<RevertStrategy>() {
+            Ok(value) => Some(value),
+            Err(err) => return error_response(err).await,
+        },
+        None => None,
     };
     let default_agent_tool = match form.default_agent_tool.parse::<AgentToolName>() {
         Ok(value) => value,
@@ -599,6 +617,9 @@ async fn update_settings(
                 form.allow_refinement_agents_during_editing.is_some(),
             ),
             create_pr: Some(form.create_pr.is_some()),
+            auto_commit: parse_optional_checkbox(form.auto_commit),
+            commit_standard: form.commit_standard,
+            revert_strategy,
             stale_claim_minutes: Some(form.stale_claim_minutes),
             worktree_cleanup_policy: Some(worktree_cleanup_policy),
             default_agent_tool: Some(default_agent_tool),
@@ -609,6 +630,77 @@ async fn update_settings(
             default_agent_reasoning_effort: Some(default_agent_reasoning_effort),
             agent_sandbox_mode,
             agent_extra_writable_roots,
+        },
+    )
+    .await
+    {
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateAutoCommitForm {
+    enabled: bool,
+}
+
+async fn update_auto_commit(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateAutoCommitForm>,
+) -> Response {
+    match projects::update_settings(
+        &state.store,
+        &project,
+        UpdateProjectSettings {
+            auto_commit: Some(form.enabled),
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(_) if is_background_form_request(&headers) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            Redirect::to(&format!("/?project={}", urlencoding::encode(&project))).into_response()
+        }
+        Err(err) => error_response(err).await,
+    }
+}
+
+fn is_background_form_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-patchbay-background")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "true")
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateCommitPolicyForm {
+    auto_commit: Option<String>,
+    commit_standard: Option<String>,
+    revert_strategy: String,
+}
+
+async fn update_commit_policy(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Form(form): Form<UpdateCommitPolicyForm>,
+) -> Response {
+    let revert_strategy = match form.revert_strategy.parse::<RevertStrategy>() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
+    match projects::update_settings(
+        &state.store,
+        &project,
+        UpdateProjectSettings {
+            auto_commit: Some(form.auto_commit.is_some()),
+            commit_standard: form.commit_standard,
+            revert_strategy: Some(revert_strategy),
+            ..Default::default()
         },
     )
     .await
@@ -1098,6 +1190,15 @@ fn parse_optional_reasoning_effort(value: Option<String>) -> Result<Option<Agent
         Some(value) => Ok(Some(value.parse::<AgentReasoningEffort>()?)),
         None => Ok(None),
     }
+}
+
+fn parse_optional_checkbox(value: Option<String>) -> Option<bool> {
+    value.map(|value| {
+        !matches!(
+            value.trim().to_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 #[derive(serde::Deserialize)]

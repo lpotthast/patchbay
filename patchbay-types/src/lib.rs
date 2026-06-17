@@ -98,6 +98,9 @@ pub struct ProjectView {
     pub max_code_edit_agents: i64,
     pub allow_refinement_agents_during_editing: bool,
     pub create_pr: bool,
+    pub auto_commit: bool,
+    pub commit_standard: String,
+    pub revert_strategy: RevertStrategy,
     pub stale_claim_minutes: i64,
     pub worktree_cleanup_policy: WorktreeCleanupPolicy,
     pub default_agent_tool: AgentToolName,
@@ -398,6 +401,42 @@ impl FromStr for WorktreeCleanupPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertStrategy {
+    Manual,
+    GitReset,
+}
+
+impl RevertStrategy {
+    pub fn as_storage(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::GitReset => "git_reset",
+        }
+    }
+}
+
+impl fmt::Display for RevertStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_storage())
+    }
+}
+
+impl FromStr for RevertStrategy {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().replace('-', "_").as_str() {
+            "manual" => Ok(Self::Manual),
+            "git_reset" => Ok(Self::GitReset),
+            _ => Err(ParseEnumError(
+                "revert strategy must be one of: manual, git_reset",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProjectSettingsView {
     pub id: i64,
@@ -406,6 +445,9 @@ pub struct ProjectSettingsView {
     pub max_code_edit_agents: i64,
     pub allow_refinement_agents_during_editing: bool,
     pub create_pr: bool,
+    pub auto_commit: bool,
+    pub commit_standard: String,
+    pub revert_strategy: RevertStrategy,
     pub stale_claim_minutes: i64,
     pub worktree_cleanup_policy: WorktreeCleanupPolicy,
     pub default_agent_tool: AgentToolName,

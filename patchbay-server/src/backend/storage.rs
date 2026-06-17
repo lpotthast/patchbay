@@ -150,6 +150,7 @@ mod tests {
             "m20260616_000023_add_project_agent_extra_writable_roots",
             "m20260616_000024_add_project_agent_sandbox_mode",
             "m20260617_000025_decouple_states_and_swim_lanes",
+            "m20260617_000026_add_project_commit_policy",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());

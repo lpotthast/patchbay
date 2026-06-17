@@ -99,6 +99,7 @@ The Leptos UI uses server form handlers for operator actions such as:
 
 - creating, updating, and deleting projects;
 - updating project prompts, memory, and settings;
+- toggling project auto-commit and updating project commit policy;
 - creating, updating, moving, deleting, and commenting on work items;
 - starting, stopping, and recovering automation;
 - cleaning up worktrees;
@@ -107,6 +108,8 @@ The Leptos UI uses server form handlers for operator actions such as:
 - picking folders on the local system.
 
 These endpoints are UI integration points, not the stable agent-facing API.
+
+Hydrated UI controls that save data in the background may post to these same form handlers with an internal background-request marker. Those requests should return a non-navigating success response while ordinary form posts keep their redirect fallback.
 
 ## Errors
 

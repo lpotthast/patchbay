@@ -68,6 +68,15 @@ pub struct Model {
     pub create_pr: bool,
 
     #[ck_create_model(exclude)]
+    pub auto_commit: bool,
+
+    #[ck_create_model(exclude)]
+    pub commit_standard: String,
+
+    #[ck_create_model(exclude)]
+    pub revert_strategy: String,
+
+    #[ck_create_model(exclude)]
     pub stale_claim_minutes: i64,
 
     #[ck_create_model(exclude)]

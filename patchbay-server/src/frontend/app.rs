@@ -37,8 +37,8 @@ use crate::{
         CLAIMED_FROM_STATE_LABEL_KEY, CodexAgentModel, CodexAppServerStatusView,
         CodexAuthSetupView, CodexRateLimitView, CodexUsageSummaryView, CommentView,
         ProjectLabelView, ProjectMemoryEventRefView, ProjectMemoryEventView, ProjectSettingsView,
-        ProjectView, RunLogView, STATE_LABEL_KEY, SwimLaneView, UiEvent, WorkItemLabelView,
-        WorkItemStateView, WorkItemView,
+        ProjectView, RevertStrategy, RunLogView, STATE_LABEL_KEY, SwimLaneView, UiEvent,
+        WorkItemLabelView, WorkItemStateView, WorkItemView, WorkspaceMode,
     },
 };
 #[cfg(not(feature = "ssr"))]
@@ -218,6 +218,9 @@ enum ActivePage {
 struct TopBarAutomation {
     project: String,
     running: bool,
+    workspace_mode: WorkspaceMode,
+    auto_commit: ReadSignal<bool>,
+    set_auto_commit: WriteSignal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -851,6 +854,8 @@ fn board_content(page: BoardPage) -> AnyView {
         settings,
         automation_status,
     ) {
+        let topbar_settings = settings.clone();
+        let (auto_commit, set_auto_commit) = signal(settings.auto_commit);
         let topbar = top_bar(
             projects,
             active_project_names,
@@ -859,6 +864,9 @@ fn board_content(page: BoardPage) -> AnyView {
             Some(TopBarAutomation {
                 project: project.clone(),
                 running: automation_running || automation_status.running_runs > 0,
+                workspace_mode: topbar_settings.workspace_mode,
+                auto_commit,
+                set_auto_commit,
             }),
             codex_status.clone(),
         );
@@ -907,8 +915,14 @@ fn board_content(page: BoardPage) -> AnyView {
         );
         let work_items_api_base_url = api_base_url.clone();
         let admin_project_id = project_view.id;
-        let project_settings =
-            project_settings_view(&project, project_view, settings, memory_events);
+        let project_settings = project_settings_view(
+            &project,
+            project_view,
+            settings,
+            memory_events,
+            auto_commit,
+            set_auto_commit,
+        );
         let automation_view = view! {
             <LiveBoardAutomation
                 project=project.clone()
@@ -2325,6 +2339,27 @@ fn projects_crudkit_config(api_base_url: String) -> CrudInstanceConfig {
                     },
                 ),
                 Elem::field(
+                    ProjectField::AutoCommit,
+                    FieldOptions {
+                        label: Some(Label::new("Auto-Commit")),
+                        ..Default::default()
+                    },
+                ),
+                Elem::field(
+                    ProjectField::CommitStandard,
+                    FieldOptions {
+                        label: Some(Label::new("Commit standard")),
+                        ..Default::default()
+                    },
+                ),
+                Elem::field(
+                    ProjectField::RevertStrategy,
+                    FieldOptions {
+                        label: Some(Label::new("Failure revert")),
+                        ..Default::default()
+                    },
+                ),
+                Elem::field(
                     ProjectField::StaleClaimMinutes,
                     FieldOptions {
                         label: Some(Label::new("Stale claim minutes")),
@@ -2430,6 +2465,13 @@ fn projects_crudkit_config(api_base_url: String) -> CrudInstanceConfig {
                 ProjectField::WorktreeCleanupPolicy,
                 select_field_renderer::<DynUpdateField>(
                     &[("manual", "manual"), ("after_success", "after_success")],
+                    false,
+                ),
+            )
+            .register(
+                ProjectField::RevertStrategy,
+                select_field_renderer::<DynUpdateField>(
+                    &[("manual", "manual"), ("git_reset", "git_reset")],
                     false,
                 ),
             )
@@ -4332,11 +4374,17 @@ fn LiveBoardAutomation(
 fn project_settings_view(
     project: &str,
     project_view: ProjectView,
-    _settings: ProjectSettingsView,
+    settings: ProjectSettingsView,
     memory_events: Vec<ProjectMemoryEventView>,
+    auto_commit: ReadSignal<bool>,
+    set_auto_commit: WriteSignal<bool>,
 ) -> impl IntoView + 'static {
     let prompt_action = format!("/projects/{}/system-prompt", encode_path(project));
     let memory_action = format!("/projects/{}/memory", encode_path(project));
+    let commit_policy_action = format!("/projects/{}/settings/commit-policy", encode_path(project));
+    let commit_standard = settings.commit_standard.clone();
+    let manual_revert_selected = settings.revert_strategy == RevertStrategy::Manual;
+    let git_reset_selected = settings.revert_strategy == RevertStrategy::GitReset;
     let initial_memory = project_view.memory.clone();
     let dirty_baseline = initial_memory.clone();
     let history_for_options = memory_events.clone();
@@ -4423,6 +4471,37 @@ fn project_settings_view(
                         {initial_memory}
                     </textarea>
                     <button disabled=move || selected_event_id.get().is_some()>"Save memory"</button>
+                </form>
+            </div>
+            <div class="commit-policy">
+                <h2>"Automation policy"</h2>
+                <form method="post" action=commit_policy_action>
+                    <label class="checkbox-row" for="project-auto-commit">
+                        <input
+                            id="project-auto-commit"
+                            type="checkbox"
+                            name="auto_commit"
+                            prop:checked=move || auto_commit.get()
+                            on:change=move |event| {
+                                set_auto_commit.set(event_target_checked(&event));
+                            }
+                        />
+                        <span>"Auto-Commit"</span>
+                    </label>
+                    <label for="project-commit-standard">"Commit standard"</label>
+                    <textarea
+                        id="project-commit-standard"
+                        name="commit_standard"
+                        placeholder="Commit message standard"
+                    >
+                        {commit_standard}
+                    </textarea>
+                    <label for="project-revert-strategy">"Failure revert"</label>
+                    <select id="project-revert-strategy" name="revert_strategy">
+                        <option value="manual" selected=manual_revert_selected>"revert manually"</option>
+                        <option value="git_reset" selected=git_reset_selected>"git reset"</option>
+                    </select>
+                    <button>"Save policy"</button>
                 </form>
             </div>
         </section>
@@ -5542,16 +5621,20 @@ fn top_bar_codex_status(status: CodexAppServerStatusView, href: String, active: 
 }
 
 fn top_bar_automation_control(control: TopBarAutomation) -> AnyView {
+    let auto_commit_control = top_bar_auto_commit_control(&control);
     if control.running {
         let stop_action = format!(
             "/projects/{}/automation/stop",
             encode_path(&control.project)
         );
         view! {
-            <form class="topbar-automation" method="post" action=stop_action>
-                <span class="automation-status running">"Running"</span>
-                <button type="submit" class="danger">"Stop"</button>
-            </form>
+            <div class="topbar-automation-group">
+                {auto_commit_control}
+                <form class="topbar-automation" method="post" action=stop_action>
+                    <span class="automation-status running">"Running"</span>
+                    <button type="submit" class="danger">"Stop"</button>
+                </form>
+            </div>
         }
         .into_any()
     } else {
@@ -5560,14 +5643,121 @@ fn top_bar_automation_control(control: TopBarAutomation) -> AnyView {
             encode_path(&control.project)
         );
         view! {
-            <form class="topbar-automation" method="post" action=start_action>
-                <input type="hidden" name="mode" value="execute"/>
-                <span class="automation-status stopped">"Stopped"</span>
-                <button type="submit">"Start"</button>
-            </form>
+            <div class="topbar-automation-group">
+                {auto_commit_control}
+                <form class="topbar-automation" method="post" action=start_action>
+                    <input type="hidden" name="mode" value="execute"/>
+                    <span class="automation-status stopped">"Stopped"</span>
+                    <button type="submit">"Start"</button>
+                </form>
+            </div>
         }
         .into_any()
     }
+}
+
+fn top_bar_auto_commit_control(control: &TopBarAutomation) -> Option<AnyView> {
+    if control.workspace_mode != WorkspaceMode::CurrentBranch {
+        return None;
+    }
+    let action = format!(
+        "/projects/{}/settings/auto-commit",
+        encode_path(&control.project)
+    );
+    let auto_commit = control.auto_commit;
+    let set_auto_commit = control.set_auto_commit;
+    let (pending, set_pending) = signal(false);
+    let (failed, set_failed) = signal(false);
+    let form_action = action.clone();
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let previous = auto_commit.get_untracked();
+        let next = !previous;
+        set_auto_commit.set(next);
+        set_pending.set(true);
+        set_failed.set(false);
+
+        let form_action = form_action.clone();
+        leptos::task::spawn_local(async move {
+            if post_auto_commit_update(form_action, next).await {
+                set_pending.set(false);
+            } else {
+                set_auto_commit.set(previous);
+                set_pending.set(false);
+                set_failed.set(true);
+            }
+        });
+    };
+
+    Some(
+        view! {
+            <form class="topbar-auto-commit-form" method="post" action=action on:submit=submit>
+                <input type="hidden" name="enabled" value=move || (!auto_commit.get()).to_string()/>
+                <button
+                    type="submit"
+                    class=move || {
+                        let mut class = if auto_commit.get() {
+                            "topbar-auto-commit enabled".to_owned()
+                        } else {
+                            "topbar-auto-commit".to_owned()
+                        };
+                        if pending.get() {
+                            class.push_str(" pending");
+                        }
+                        if failed.get() {
+                            class.push_str(" failed");
+                        }
+                        class
+                    }
+                    role="switch"
+                    aria-checked=move || auto_commit.get().to_string()
+                    title=move || {
+                        if pending.get() {
+                            "Saving Auto-Commit setting".to_owned()
+                        } else if auto_commit.get() {
+                            "Turn Auto-Commit off".to_owned()
+                        } else {
+                            "Turn Auto-Commit on".to_owned()
+                        }
+                    }
+                    disabled=move || pending.get()
+                >
+                    <span class="auto-commit-label">"Auto-Commit"</span>
+                    <span class="auto-commit-track" aria-hidden="true">
+                        <span class="auto-commit-thumb"></span>
+                    </span>
+                    <strong>{move || if auto_commit.get() { "On" } else { "Off" }}</strong>
+                </button>
+            </form>
+        }
+        .into_any(),
+    )
+}
+
+#[cfg(not(feature = "ssr"))]
+async fn post_auto_commit_update(action: String, enabled: bool) -> bool {
+    let request = match gloo_net::http::Request::post(&action)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("x-patchbay-background", "true")
+        .body(format!("enabled={enabled}"))
+    {
+        Ok(request) => request,
+        Err(_) => return false,
+    };
+
+    request
+        .send()
+        .await
+        .map(|response| response.ok())
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "ssr")]
+async fn post_auto_commit_update(_action: String, _enabled: bool) -> bool {
+    false
 }
 
 fn project_select_option(option: ProjectSelectOption) -> AnyView {

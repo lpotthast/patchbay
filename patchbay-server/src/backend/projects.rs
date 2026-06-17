@@ -27,7 +27,8 @@ use crate::{
     shared::view_models::{
         AgentReasoningEffort, AgentSandboxMode, AgentToolName, CodexAgentModel,
         ProjectMemoryCompactionView, ProjectMemoryEventView, ProjectMemoryUpdateView,
-        ProjectMemoryView, ProjectSettingsView, ProjectView, WorkspaceMode, WorktreeCleanupPolicy,
+        ProjectMemoryView, ProjectSettingsView, ProjectView, RevertStrategy, WorkspaceMode,
+        WorktreeCleanupPolicy,
     },
 };
 
@@ -57,6 +58,9 @@ pub struct UpdateProjectSettings {
     pub max_code_edit_agents: Option<i64>,
     pub allow_refinement_agents_during_editing: Option<bool>,
     pub create_pr: Option<bool>,
+    pub auto_commit: Option<bool>,
+    pub commit_standard: Option<String>,
+    pub revert_strategy: Option<RevertStrategy>,
     pub stale_claim_minutes: Option<i64>,
     pub worktree_cleanup_policy: Option<WorktreeCleanupPolicy>,
     pub default_agent_tool: Option<AgentToolName>,
@@ -127,6 +131,12 @@ impl From<ProjectModel> for ProjectView {
             max_code_edit_agents: project.max_code_edit_agents,
             allow_refinement_agents_during_editing: project.allow_refinement_agents_during_editing,
             create_pr: project.create_pr,
+            auto_commit: project.auto_commit,
+            commit_standard: project.commit_standard,
+            revert_strategy: project
+                .revert_strategy
+                .parse::<RevertStrategy>()
+                .expect("project revert strategy must be valid"),
             stale_claim_minutes: project.stale_claim_minutes,
             worktree_cleanup_policy: project
                 .worktree_cleanup_policy
@@ -201,6 +211,9 @@ pub async fn create_project(store: &Store, create: CreateProject) -> Result<Proj
         max_code_edit_agents: Set(1),
         allow_refinement_agents_during_editing: Set(false),
         create_pr: Set(false),
+        auto_commit: Set(true),
+        commit_standard: Set(String::new()),
+        revert_strategy: Set(RevertStrategy::Manual.as_storage().to_owned()),
         stale_claim_minutes: Set(0),
         worktree_cleanup_policy: Set(WorktreeCleanupPolicy::Manual.as_storage().to_owned()),
         default_agent_tool: Set(AgentToolName::Codex.as_storage().to_owned()),
@@ -539,6 +552,9 @@ pub async fn update_settings(
         && update.max_code_edit_agents.is_none()
         && update.allow_refinement_agents_during_editing.is_none()
         && update.create_pr.is_none()
+        && update.auto_commit.is_none()
+        && update.commit_standard.is_none()
+        && update.revert_strategy.is_none()
         && update.stale_claim_minutes.is_none()
         && update.worktree_cleanup_policy.is_none()
         && update.default_agent_tool.is_none()
@@ -558,6 +574,14 @@ pub async fn update_settings(
         .max_code_edit_agents
         .unwrap_or(existing.max_code_edit_agents);
     let create_pr = update.create_pr.unwrap_or(existing.create_pr);
+    let auto_commit = update.auto_commit.unwrap_or(existing.auto_commit);
+    let commit_standard = update
+        .commit_standard
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_else(|| existing.commit_standard.clone());
+    let revert_strategy = update
+        .revert_strategy
+        .unwrap_or(RevertStrategy::from_str(&existing.revert_strategy)?);
     let stale_claim_minutes = update
         .stale_claim_minutes
         .unwrap_or(existing.stale_claim_minutes);
@@ -610,6 +634,9 @@ pub async fn update_settings(
         active.allow_refinement_agents_during_editing = Set(allow_refinement_agents_during_editing);
     }
     active.create_pr = Set(create_pr);
+    active.auto_commit = Set(auto_commit);
+    active.commit_standard = Set(commit_standard);
+    active.revert_strategy = Set(revert_strategy.as_storage().to_owned());
     active.stale_claim_minutes = Set(stale_claim_minutes);
     active.worktree_cleanup_policy = Set(worktree_cleanup_policy.as_storage().to_owned());
     active.default_agent_tool = Set(default_agent_tool.as_storage().to_owned());
@@ -837,6 +864,9 @@ fn project_settings_to_view(project: ProjectModel) -> Result<ProjectSettingsView
         max_code_edit_agents: project.max_code_edit_agents,
         allow_refinement_agents_during_editing: project.allow_refinement_agents_during_editing,
         create_pr: project.create_pr,
+        auto_commit: project.auto_commit,
+        commit_standard: project.commit_standard,
+        revert_strategy: RevertStrategy::from_str(&project.revert_strategy)?,
         stale_claim_minutes: project.stale_claim_minutes,
         worktree_cleanup_policy: WorktreeCleanupPolicy::from_str(&project.worktree_cleanup_policy)?,
         default_agent_tool: AgentToolName::from_str(&project.default_agent_tool)?,
@@ -1107,6 +1137,9 @@ mod tests {
         assert_eq!(settings.workspace_mode, WorkspaceMode::CurrentBranch);
         assert_eq!(allowed_code_edit_agents(&settings), 1);
         assert!(!settings.create_pr);
+        assert!(settings.auto_commit);
+        assert_eq!(settings.commit_standard, "");
+        assert_eq!(settings.revert_strategy, RevertStrategy::Manual);
         assert_eq!(settings.stale_claim_minutes, 0);
         assert_eq!(
             settings.worktree_cleanup_policy,
@@ -1208,6 +1241,9 @@ mod tests {
             UpdateProjectSettings {
                 workspace_mode: Some(WorkspaceMode::GitBranch),
                 create_pr: Some(true),
+                auto_commit: Some(false),
+                commit_standard: Some(" Use Conventional Commits. ".to_owned()),
+                revert_strategy: Some(RevertStrategy::GitReset),
                 default_agent_tool: Some(AgentToolName::Codex),
                 agent_sandbox_mode: Some(AgentSandboxMode::DangerFullAccess),
                 agent_extra_writable_roots: Some(vec![
@@ -1226,6 +1262,12 @@ mod tests {
         assert_eq!(settings.project_id, project.id);
         assert_eq!(settings.workspace_mode, WorkspaceMode::GitBranch);
         assert_eq!(project.workspace_mode, WorkspaceMode::GitBranch);
+        assert!(!settings.auto_commit);
+        assert!(!project.auto_commit);
+        assert_eq!(settings.commit_standard, "Use Conventional Commits.");
+        assert_eq!(project.commit_standard, "Use Conventional Commits.");
+        assert_eq!(settings.revert_strategy, RevertStrategy::GitReset);
+        assert_eq!(project.revert_strategy, RevertStrategy::GitReset);
         assert_eq!(project.default_agent_tool, AgentToolName::Codex);
         assert_eq!(
             settings.agent_sandbox_mode,
