@@ -456,57 +456,12 @@ pub async fn claim_item(
         .begin()
         .await
         .context("failed to start item claim")?;
-    let now = utc_now();
+    let item = claim_first_matching_candidate_in_tx(&txn, project_id, agent_id, |labels| {
+        Ok(!item_labels::is_automation_blocked(labels)
+            && item_labels::current_state(labels).as_deref() == Some(state_filter.as_str()))
+    })
+    .await?;
 
-    let claimed_id = txn
-        .query_one(Statement::from_sql_and_values(
-            sea_orm::DbBackend::Sqlite,
-            r#"
-            UPDATE work_items
-            SET claimed_by = ?2,
-                claimed_at = ?3,
-                claim_expires_at = NULL,
-                finished_at = NULL,
-                version = version + 1,
-                updated_at = ?3
-            WHERE id = (
-                SELECT work_items.id
-                FROM work_items
-                INNER JOIN work_item_labels
-                    ON work_item_labels.work_item_id = work_items.id
-                   AND work_item_labels.label_key = ?5
-                   AND work_item_labels.label_value = ?4
-                WHERE work_items.project_id = ?1
-                  AND claimed_by IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM work_item_labels blocked_labels
-                      WHERE blocked_labels.work_item_id = work_items.id
-                        AND blocked_labels.label_key IN (?6, ?7)
-                  )
-                ORDER BY work_items.updated_at ASC, work_items.id ASC
-                LIMIT 1
-            )
-            RETURNING id
-            "#,
-            vec![
-                project_id.into(),
-                agent_id.to_owned().into(),
-                now.clone().into(),
-                state_filter.clone().into(),
-                STATE_LABEL_KEY.into(),
-                AUTOMATION_BLOCKED_LABEL_KEY.into(),
-                FEEDBACK_REQUESTED_LABEL_KEY.into(),
-            ],
-        ))
-        .await
-        .context("failed to claim work item")?
-        .map(|row| row.try_get::<i64>("", "id"))
-        .transpose()
-        .context("failed to read claimed item id")?;
-
-    let item =
-        record_claimed_id_in_tx(&txn, project_id, claimed_id, agent_id, &state_filter).await?;
     commit_claim_transaction(
         store,
         project_name,
@@ -532,46 +487,17 @@ pub async fn claim_item_matching_condition(
         .begin()
         .await
         .context("failed to start item claim")?;
-    let candidates = unclaimed_items_in_claim_order(&txn, project_id).await?;
-    let labels_by_item = labels_for_candidate_items(&txn, project_id, &candidates).await?;
-
-    for candidate in candidates {
-        let labels = labels_for_item(&labels_by_item, candidate.id);
-        if !item_labels::automation_selector_matches(condition, labels)? {
-            continue;
-        }
-        let source_state = item_labels::source_state_for_new_claim(labels);
-
-        let claimed = claim_candidate_in_tx(
-            &txn,
-            project_id,
-            candidate.id,
-            agent_id,
-            &source_state,
-            FinishedClaimPolicy::AllowFinished,
-        )
-        .await?;
-
-        let Some(item) = claimed else {
-            continue;
-        };
-
-        return commit_claim_transaction(
-            store,
-            project_name,
-            txn,
-            Some(item),
-            "failed to commit item claim",
-        )
-        .await;
-    }
+    let item = claim_first_matching_candidate_in_tx(&txn, project_id, agent_id, |labels| {
+        item_labels::automation_selector_matches(condition, labels)
+    })
+    .await?;
 
     commit_claim_transaction(
         store,
         project_name,
         txn,
-        None,
-        "failed to commit empty claim",
+        item,
+        "failed to commit item claim",
     )
     .await
 }
@@ -1187,6 +1113,44 @@ fn labels_for_item(
         .unwrap_or(&[])
 }
 
+async fn claim_first_matching_candidate_in_tx<C, F>(
+    conn: &C,
+    project_id: i64,
+    agent_id: &str,
+    mut matches_candidate: F,
+) -> Result<Option<WorkItemModel>>
+where
+    C: ConnectionTrait,
+    F: FnMut(&[WorkItemLabelView]) -> Result<bool>,
+{
+    let candidates = unclaimed_items_in_claim_order(conn, project_id).await?;
+    let labels_by_item = labels_for_candidate_items(conn, project_id, &candidates).await?;
+
+    for candidate in candidates {
+        let labels = labels_for_item(&labels_by_item, candidate.id);
+        if !matches_candidate(labels)? {
+            continue;
+        }
+
+        let source_state = item_labels::source_state_for_new_claim(labels);
+        let claimed = claim_candidate_in_tx(
+            conn,
+            project_id,
+            candidate.id,
+            agent_id,
+            &source_state,
+            FinishedClaimPolicy::AllowFinished,
+        )
+        .await?;
+
+        if claimed.is_some() {
+            return Ok(claimed);
+        }
+    }
+
+    Ok(None)
+}
+
 async fn claim_candidate_in_tx<C>(
     conn: &C,
     project_id: i64,
@@ -1250,19 +1214,6 @@ where
         .transpose()
         .context("failed to read claimed item id")?;
 
-    record_claimed_id_in_tx(conn, project_id, claimed_id, agent_id, source_state).await
-}
-
-async fn record_claimed_id_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    claimed_id: Option<i64>,
-    agent_id: &str,
-    source_state: &str,
-) -> Result<Option<WorkItemModel>>
-where
-    C: sea_orm::ConnectionTrait,
-{
     let Some(item_id) = claimed_id else {
         return Ok(None);
     };
@@ -2511,6 +2462,52 @@ mod tests {
     #[tokio::test]
     async fn new_claims_overwrite_stale_claim_source_with_current_state() {
         let (_temp, store) = test_store().await;
+        let state_item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "State retry".to_owned(),
+                description: "State claims use the current state as release source".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        add_label(
+            &store,
+            "demo",
+            state_item.id,
+            CLAIMED_FROM_STATE_LABEL_KEY.to_owned(),
+            Some("ready".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let claimed = claim_item(&store, "demo", "agent-state", "open")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(claimed.labels.iter().any(|label| {
+            label.key == CLAIMED_FROM_STATE_LABEL_KEY && label.value.as_deref() == Some("open")
+        }));
+
+        let released = release_item(
+            &store,
+            "demo",
+            state_item.id,
+            "agent-state",
+            None,
+            ReleaseAutomationDisposition::Claimable,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(released.state.as_deref(), Some("open"));
+
         let selector_item = create_item(
             &store,
             "demo",
