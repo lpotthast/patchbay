@@ -37,9 +37,8 @@ use crate::{
     frontend,
     shared::view_models::{
         AgentGitCommandPolicy, AgentGitHardResetPolicy, AgentReasoningEffort, AgentRunStatus,
-        AgentToolName, AuthorType, AutomationActivation, AutomationEffect, AutomationMode,
-        DEFAULT_STATE_LABEL, ProcessSessionView, RevertStrategy, WorkspaceMode,
-        WorktreeCleanupPolicy,
+        AgentToolName, AuthorType, AutomationActivation, AutomationEffect, DEFAULT_STATE_LABEL,
+        ProcessSessionView, RevertStrategy, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -882,7 +881,6 @@ fn safe_return_to(return_to: Option<String>, fallback: String) -> String {
 
 #[derive(serde::Deserialize)]
 struct StartAutomationForm {
-    mode: String,
     tool: Option<String>,
     item_id: Option<i64>,
     prompt: Option<String>,
@@ -893,10 +891,6 @@ async fn start_automation(
     Path(project): Path<String>,
     Form(form): Form<StartAutomationForm>,
 ) -> Response {
-    let mode = match form.mode.parse::<AutomationMode>() {
-        Ok(value) => value,
-        Err(err) => return error_response(err).await,
-    };
     let tool = match form.tool.filter(|value| !value.trim().is_empty()) {
         Some(tool) => match tool.parse::<AgentToolName>() {
             Ok(value) => Some(value),
@@ -904,8 +898,7 @@ async fn start_automation(
         },
         None => None,
     };
-    let is_one_shot = mode != AutomationMode::Execute
-        || tool.is_some()
+    let is_one_shot = tool.is_some()
         || form.item_id.is_some()
         || form
             .prompt
@@ -917,7 +910,6 @@ async fn start_automation(
             state.store.clone(),
             project.clone(),
             StartAutomation {
-                mode,
                 tool,
                 work_item_id: form.item_id,
                 work_item_selector: None,
@@ -1009,7 +1001,6 @@ struct CreateAutomationTriggerForm {
     effect: String,
     #[serde(default = "default_automation_schedule")]
     schedule: String,
-    mode: Option<String>,
     tool: Option<String>,
     work_item_selector: Option<String>,
     priority: Option<i64>,
@@ -1028,13 +1019,6 @@ async fn create_automation_trigger(
     let effect = match form.effect.parse::<AutomationEffect>() {
         Ok(value) => value,
         Err(err) => return error_response(err).await,
-    };
-    let mode = match form.mode.filter(|value| !value.trim().is_empty()) {
-        Some(mode) => match mode.parse::<AutomationMode>() {
-            Ok(value) => Some(value),
-            Err(err) => return error_response(err).await,
-        },
-        None => None,
     };
     let tool_name = match form.tool.filter(|value| !value.trim().is_empty()) {
         Some(tool) => match tool.parse::<AgentToolName>() {
@@ -1057,7 +1041,6 @@ async fn create_automation_trigger(
             activation,
             effect,
             schedule: form.schedule,
-            mode,
             tool_name,
             prompt: form.prompt.unwrap_or_default(),
             work_item_selector,

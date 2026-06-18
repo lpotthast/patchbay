@@ -882,9 +882,6 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
             normalize_required_schedule(std::mem::take(&mut create_model.schedule))?;
         let activation = parse_activation(&create_model.activation)?;
         let effect = parse_effect(&create_model.effect)?;
-        create_model.mode = automation_triggers::default_mode_for_activation(activation)
-            .as_storage()
-            .to_owned();
         create_model.work_item_selector =
             normalize_selector_storage(activation, create_model.work_item_selector.take())?;
         let selector = parse_work_item_selector(create_model.work_item_selector.as_deref())?;
@@ -893,10 +890,6 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
             activation,
             effect,
             &create_model.schedule,
-            create_model
-                .mode
-                .parse::<crate::shared::view_models::AutomationMode>()
-                .map_err(|err| trigger_unprocessable_error(err.to_string()))?,
             selector.as_ref(),
             &create_model.prompt,
         )?;
@@ -937,9 +930,6 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         let previous_activation = parse_activation(&existing.activation)?;
         let activation = parse_activation(&update_model.activation)?;
         let effect = parse_effect(&update_model.effect)?;
-        update_model.mode = automation_triggers::default_mode_for_activation(activation)
-            .as_storage()
-            .to_owned();
         update_model.work_item_selector =
             normalize_selector_storage(activation, update_model.work_item_selector.take())?;
         let selector = parse_work_item_selector(update_model.work_item_selector.as_deref())?;
@@ -948,10 +938,6 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
             activation,
             effect,
             &update_model.schedule,
-            update_model
-                .mode
-                .parse::<crate::shared::view_models::AutomationMode>()
-                .map_err(|err| trigger_unprocessable_error(err.to_string()))?,
             selector.as_ref(),
             &update_model.prompt,
         )?;
@@ -1085,7 +1071,6 @@ fn validate_trigger_configuration(
     activation: AutomationActivation,
     effect: AutomationEffect,
     schedule: &str,
-    mode: crate::shared::view_models::AutomationMode,
     work_item_selector: Option<&crudkit_core::condition::Condition>,
     prompt: &str,
 ) -> Result<(), HookError<AutomationTriggerHookError>> {
@@ -1094,7 +1079,6 @@ fn validate_trigger_configuration(
         activation,
         effect,
         schedule,
-        mode,
         work_item_selector,
         prompt,
     )

@@ -874,49 +874,6 @@ pub struct CommentView {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AutomationMode {
-    Execute,
-    Refine,
-    Review,
-}
-
-impl AutomationMode {
-    pub fn as_storage(self) -> &'static str {
-        match self {
-            Self::Execute => "execute",
-            Self::Refine => "refine",
-            Self::Review => "review",
-        }
-    }
-
-    pub fn claims_work(self) -> bool {
-        matches!(self, Self::Execute | Self::Refine)
-    }
-}
-
-impl fmt::Display for AutomationMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_storage())
-    }
-}
-
-impl FromStr for AutomationMode {
-    type Err = ParseEnumError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_lowercase().as_str() {
-            "execute" => Ok(Self::Execute),
-            "refine" => Ok(Self::Refine),
-            "review" => Ok(Self::Review),
-            _ => Err(ParseEnumError(
-                "automation mode must be one of: execute, refine, review",
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     Running,
     Completed,
@@ -1016,7 +973,6 @@ pub struct AgentRunView {
     pub memory_event_id: Option<i64>,
     pub trigger_id: Option<i64>,
     pub trigger_name: Option<String>,
-    pub mode: AutomationMode,
     pub tool_name: AgentToolName,
     pub status: AgentRunStatus,
     pub command: String,
@@ -1216,7 +1172,6 @@ pub struct AutomationTriggerView {
     pub activation: AutomationActivation,
     pub effect: AutomationEffect,
     pub schedule: String,
-    pub mode: AutomationMode,
     pub tool_name: AgentToolName,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,

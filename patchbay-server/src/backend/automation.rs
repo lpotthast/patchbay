@@ -38,7 +38,7 @@ use crate::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentCommitOutcome, AgentGitRuntimePolicy,
         AgentReasoningEffort, AgentRunOutputKind, AgentRunOutputLog, AgentRunOutputPiece,
         AgentRunStatus, AgentRunTokenUsageView, AgentRunView, AgentSandboxMode, AgentToolName,
-        AutomationMode, AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL,
+        AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL,
         FINISHED_STATE_LABEL, ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView,
         RevertStrategy, RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
     },
@@ -58,7 +58,6 @@ fn patchbay_agent_instructions_body() -> &'static str {
 
 #[derive(Clone, Debug)]
 pub struct StartAutomation {
-    pub mode: AutomationMode,
     pub tool: Option<AgentToolName>,
     pub work_item_id: Option<i64>,
     pub work_item_selector: Option<Condition>,
@@ -98,7 +97,6 @@ struct LaunchDetails {
 
 struct PromptContext<'a> {
     project_name: &'a str,
-    mode: AutomationMode,
     system_prompt: &'a str,
     memory: &'a str,
     memory_event_id: Option<i64>,
@@ -370,7 +368,7 @@ async fn begin_automation_run(
     enforce_concurrency(store, project_name, &settings).await?;
 
     let tool = start.tool.unwrap_or(settings.default_agent_tool);
-    let run = create_run(store, project.id, start.mode, tool, start.trigger.as_ref()).await?;
+    let run = create_run(store, project.id, tool, start.trigger.as_ref()).await?;
 
     Ok(StartedAutomationRun {
         project_name: project_name.to_owned(),
@@ -462,7 +460,7 @@ async fn complete_started_automation_run(
         }
     };
 
-    let claimed_item = if start.mode.claims_work() {
+    let claimed_item = {
         let claimed = if let Some(work_item_id) = start.work_item_id {
             match items::claim_specific_item(store, &project_name, work_item_id, &agent_id).await {
                 Ok(claimed) => claimed,
@@ -514,8 +512,6 @@ async fn complete_started_automation_run(
             return model_to_view(run);
         }
         claimed
-    } else {
-        None
     };
 
     if let Some(item) = &claimed_item {
@@ -651,7 +647,6 @@ async fn complete_started_automation_run(
     };
     let prompt = build_prompt(PromptContext {
         project_name: &project_name,
-        mode: start.mode,
         system_prompt: &project.system_prompt,
         memory: &project.memory,
         memory_event_id,
@@ -803,7 +798,11 @@ async fn complete_started_automation_run(
                         ClaimReleaseReason::Failed
                     },
                     detail: Some(&result_summary),
-                    automation_disposition: successful_claim_release_disposition(start.mode),
+                    automation_disposition: if success {
+                        items::ReleaseAutomationDisposition::Claimable
+                    } else {
+                        items::ReleaseAutomationDisposition::Blocked
+                    },
                 },
             )
             .await?;
@@ -1248,7 +1247,6 @@ async fn running_run_count(store: &Store, project_name: &str) -> Result<i64> {
 async fn create_run(
     store: &Store,
     project_id: i64,
-    mode: AutomationMode,
     tool: AgentToolName,
     trigger: Option<&AutomationTriggerOrigin>,
 ) -> Result<AgentRunModel> {
@@ -1259,7 +1257,6 @@ async fn create_run(
         memory_event_id: Set(None),
         trigger_id: Set(trigger.map(|trigger| trigger.trigger_id)),
         trigger_name: Set(trigger.map(|trigger| trigger.trigger_name.clone())),
-        mode: Set(mode.as_storage().to_owned()),
         tool_name: Set(tool.as_storage().to_owned()),
         status: Set(AgentRunStatus::Running.as_storage().to_owned()),
         command: Set(String::new()),
@@ -1525,17 +1522,6 @@ async fn release_claim_if_needed(store: &Store, context: ClaimReleaseContext<'_>
     )
     .await?;
     Ok(())
-}
-
-fn successful_claim_release_disposition(
-    mode: AutomationMode,
-) -> items::ReleaseAutomationDisposition {
-    match mode {
-        AutomationMode::Execute => items::ReleaseAutomationDisposition::Blocked,
-        AutomationMode::Refine | AutomationMode::Review => {
-            items::ReleaseAutomationDisposition::Claimable
-        }
-    }
 }
 
 fn claim_release_comment(base: &str, run_id: i64, detail: Option<&str>) -> String {
@@ -2374,8 +2360,8 @@ fn worktree_name(branch_name: &str) -> String {
 
 fn build_prompt(context: PromptContext<'_>) -> String {
     let mut prompt = format!(
-        "# Patchbay Automation\n\nProject: {}\nMode: {}\nAgent id: {}\n\n",
-        context.project_name, context.mode, context.agent_id
+        "# Patchbay Automation\n\nProject: {}\nAgent id: {}\n\n",
+        context.project_name, context.agent_id
     );
     prompt.push_str("## Patchbay Agent Instructions\n\n");
     prompt.push_str(patchbay_agent_instructions_body());
@@ -2425,11 +2411,6 @@ fn build_prompt(context: PromptContext<'_>) -> String {
             item.description
         ));
     }
-    if let Some(mode_instructions) = mode_specific_workflow_instructions(context.mode) {
-        prompt.push_str("## Mode-Specific Workflow\n\n");
-        prompt.push_str(mode_instructions);
-        prompt.push_str("\n\n");
-    }
     prompt.push_str("## Git Commit And Revert Policy\n\n");
     prompt.push_str(&format!("Workspace mode: {}\n", context.workspace_mode));
     match context.workspace_mode {
@@ -2446,37 +2427,19 @@ fn build_prompt(context: PromptContext<'_>) -> String {
                 "- At the start of work, inspect `git status --short` so you can distinguish pre-existing changes from your own changes.\n",
             );
             if context.auto_commit {
-                if context.mode == AutomationMode::Refine {
-                    prompt.push_str(
-                        "- After completed refinement or verification, inspect the diff. If you changed repository files, stage only those changes and create a git commit before ending the run; if there are no file changes, no commit is needed.\n",
-                    );
-                } else {
-                    prompt.push_str(
-                        "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
-                    );
-                }
+                prompt.push_str(
+                    "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish` or otherwise ending a successful prompt-directed run.\n",
+                );
                 prompt.push_str(
                     "- Generate the commit message from the completed diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
                 );
-                if context.mode == AutomationMode::Refine {
-                    prompt.push_str(
-                        "- If the project is not a git repository or there are no file changes to commit, say that in your final response instead of inventing a commit.\n",
-                    );
-                } else {
-                    prompt.push_str(
-                        "- If the project is not a git repository or there are no file changes to commit, say that in the finish report instead of inventing a commit.\n",
-                    );
-                }
+                prompt.push_str(
+                    "- If the project is not a git repository or there are no file changes to commit, say that in the finish report or final response instead of inventing a commit.\n",
+                );
             } else {
-                if context.mode == AutomationMode::Refine {
-                    prompt.push_str(
-                        "- Do not create a git commit solely for Patchbay after completed refinement; leave completed file changes in the current branch and describe them in your final response.\n",
-                    );
-                } else {
-                    prompt.push_str(
-                        "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report.\n",
-                    );
-                }
+                prompt.push_str(
+                    "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report or final response.\n",
+                );
             }
             prompt.push_str(&format!(
                 "- If the work cannot be completed, revert all changes you made using the `{}` strategy before calling `patchbay item release --comment ...`.\n",
@@ -2488,15 +2451,9 @@ fn build_prompt(context: PromptContext<'_>) -> String {
             prompt.push_str(
                 "Auto-commit: always on for this workspace mode\nFailure revert strategy: not applicable\n\n",
             );
-            if context.mode == AutomationMode::Refine {
-                prompt.push_str(
-                    "- After completed refinement or verification, inspect the diff. If you changed repository files, stage the changes for this work item and create a git commit before ending the run; if there are no file changes, no commit is needed.\n",
-                );
-            } else {
-                prompt.push_str(
-                    "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
-                );
-            }
+            prompt.push_str(
+                "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish` or otherwise ending a successful prompt-directed run.\n",
+            );
             prompt.push_str(
                 "- If the work cannot be completed, do not revert partial changes solely because the work is incomplete. Commit the useful partial work and then call `patchbay item release --comment ...` with what you tried and what remains.\n",
             );
@@ -2539,21 +2496,6 @@ fn build_prompt(context: PromptContext<'_>) -> String {
         );
     }
     prompt
-}
-
-fn mode_specific_workflow_instructions(mode: AutomationMode) -> Option<&'static str> {
-    match mode {
-        AutomationMode::Execute | AutomationMode::Review => None,
-        AutomationMode::Refine => Some(
-            "This refinement run is expected to improve Patchbay work-item metadata rather than complete the underlying implementation work. These instructions override generic finish/release guidance for successful refinement runs.\n\n\
-            - Do not call `patchbay item finish` after a successful refinement or verification pass.\n\
-            - Do not call `patchbay item release` after a successful refinement or verification pass; Patchbay will release the temporary claim when your process exits.\n\
-            - Use `patchbay item update`, label commands, and progress comments to record the result.\n\
-            - Remove the trigger label when the pass is complete so this automation does not immediately claim the item again.\n\
-            - If the pass is blocked or cannot be completed, leave the trigger label in place and call `patchbay item release --comment ...` with the blocker.\n\
-            - Do not edit repository files unless the trigger prompt explicitly requires it. If there are no file changes, no git commit is needed.",
-        ),
-    }
 }
 
 fn git_command_policy_prompt(
@@ -3135,7 +3077,6 @@ fn model_to_view(run: AgentRunModel) -> Result<AgentRunView> {
         memory_event_id: run.memory_event_id,
         trigger_id: run.trigger_id,
         trigger_name: projects::normalize_optional(run.trigger_name),
-        mode: AutomationMode::from_str(&run.mode)?,
         tool_name: AgentToolName::from_str(&run.tool_name)?,
         status: AgentRunStatus::from_str(&run.status)?,
         command: run.command,
@@ -3439,15 +3380,9 @@ mod tests {
     async fn run_log_uses_active_session_output_when_available() {
         let (temp, store) = test_store().await;
         let project = get_project(&store, "demo").await.unwrap();
-        let run = create_run(
-            &store,
-            project.id,
-            AutomationMode::Execute,
-            AgentToolName::Codex,
-            None,
-        )
-        .await
-        .unwrap();
+        let run = create_run(&store, project.id, AgentToolName::Codex, None)
+            .await
+            .unwrap();
         let log_path = temp.path().join("run.output.json");
         write_run_output_log(
             &log_path,
@@ -3596,7 +3531,6 @@ mod tests {
         };
         let prompt = build_prompt(PromptContext {
             project_name: "demo",
-            mode: AutomationMode::Execute,
             system_prompt: "",
             memory: "",
             memory_event_id: Some(7),
@@ -3644,6 +3578,7 @@ mod tests {
         assert!(prompt.contains("full project memory snapshot"));
         assert!(prompt.contains("patchbay memory append --body"));
         assert!(prompt.contains("MemoryChanged event: #7"));
+        assert!(!prompt.contains("Mode:"));
         assert!(!prompt.contains("PATCHBAY_DATABASE"));
         assert!(!prompt.contains("--project demo"));
         assert!(!prompt.contains("PATCHBAY_URL"));
@@ -3669,7 +3604,6 @@ mod tests {
     fn worktree_prompt_commits_incomplete_work_instead_of_reverting() {
         let prompt = build_prompt(PromptContext {
             project_name: "demo",
-            mode: AutomationMode::Execute,
             system_prompt: "",
             memory: "",
             memory_event_id: None,
@@ -3693,45 +3627,6 @@ mod tests {
         assert!(prompt.contains("`git reset --hard` is allowed because this run uses an isolated"));
         assert!(
             prompt.contains("not configured; infer the repository's existing commit message style")
-        );
-    }
-
-    #[test]
-    fn refine_prompt_overrides_successful_finish_and_release_guidance() {
-        let prompt = build_prompt(PromptContext {
-            project_name: "demo",
-            mode: AutomationMode::Refine,
-            system_prompt: "",
-            memory: "",
-            memory_event_id: None,
-            item: None,
-            agent_id: "patchbay-run-1",
-            extra_prompt: Some("Refine labeled work."),
-            workspace_mode: WorkspaceMode::CurrentBranch,
-            auto_commit: true,
-            commit_standard: "",
-            revert_strategy: RevertStrategy::Manual,
-            create_pr: false,
-            agent_git_command_policy: &Default::default(),
-        });
-
-        assert!(prompt.contains("## Mode-Specific Workflow"));
-        assert!(prompt.contains("Do not call `patchbay item finish` after a successful"));
-        assert!(prompt.contains("Patchbay will release the temporary claim"));
-        assert!(prompt.contains("Remove the trigger label"));
-        assert!(prompt.contains("no git commit is needed"));
-        assert!(!prompt.contains("create a git commit before calling `patchbay item finish`"));
-    }
-
-    #[test]
-    fn successful_refine_runs_release_claims_without_blocking_automation() {
-        assert_eq!(
-            successful_claim_release_disposition(AutomationMode::Execute),
-            items::ReleaseAutomationDisposition::Blocked
-        );
-        assert_eq!(
-            successful_claim_release_disposition(AutomationMode::Refine),
-            items::ReleaseAutomationDisposition::Claimable
         );
     }
 
@@ -3852,15 +3747,9 @@ mod tests {
         .await
         .unwrap();
         let project = get_project(&store, "demo").await.unwrap();
-        let run = create_run(
-            &store,
-            project.id,
-            AutomationMode::Execute,
-            AgentToolName::Codex,
-            None,
-        )
-        .await
-        .unwrap();
+        let run = create_run(&store, project.id, AgentToolName::Codex, None)
+            .await
+            .unwrap();
         let agent_id = format!("patchbay-run-{}", run.id);
         claim_item(&store, "demo", &agent_id, "ready")
             .await

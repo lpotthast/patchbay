@@ -1900,10 +1900,6 @@ fn item_content(page: ItemPage) -> AnyView {
                     </form>
                     <form method="post" action=automation_action>
                         <input type="hidden" name="item_id" value=item.id.to_string()/>
-                        <select name="mode">
-                            <option value="execute">"execute"</option>
-                            <option value="refine">"refine"</option>
-                        </select>
                         <button>"Start agent"</button>
                     </form>
                 </section>
@@ -2101,8 +2097,6 @@ fn automation_runs_view(project: &str, runs: Vec<AgentRunView>) -> AnyView {
                     <a href=href>"#" {run.id}</a>
                     " · "
                     {run.status.to_string()}
-                    " · "
-                    {run.mode.to_string()}
                     {tokens.map(|tokens| view! {
                         <>
                             " · "
@@ -2196,8 +2190,6 @@ fn run_log_content(page: RunLogPage) -> AnyView {
                     <h1>{title.clone()}</h1>
                     <p>
                         {run_log.run.status.to_string()}
-                        " · "
-                        {run_log.run.mode.to_string()}
                         " · "
                         {summary.clone()}
                     </p>
@@ -3511,7 +3503,7 @@ fn automation_triggers_crudkit_config(
     project_id: i64,
     kind: AutomationTableKind,
 ) -> CrudInstanceConfig {
-    let mut list_columns = vec![
+    let list_columns = vec![
         Header::showing(
             ReadAutomationTriggerField::Id,
             HeaderOptions {
@@ -3581,19 +3573,6 @@ fn automation_triggers_crudkit_config(
             },
         ),
     ];
-    if matches!(kind, AutomationTableKind::Consuming) {
-        list_columns.insert(
-            4,
-            Header::showing(
-                ReadAutomationTriggerField::Mode,
-                HeaderOptions {
-                    display_name: "Mode".into(),
-                    ..Default::default()
-                },
-            ),
-        );
-    }
-
     let mut create_children = vec![
         Elem::create_field(
             CreateAutomationTriggerField::Name,
@@ -5102,7 +5081,6 @@ fn RunSessionsPanel(
                         <div class="session-head">
                             <strong>"#" {run_id}</strong>
                             <span>{session.run.status.to_string()}</span>
-                            <span>{session.run.mode.to_string()}</span>
                             {origin.map(|origin| view! { <span>{origin}</span> })}
                             {tokens.map(|tokens| view! { <span>{tokens}</span> })}
                             {is_active.then(|| view! { <span class="live-badge">"active"</span> })}
@@ -5274,8 +5252,7 @@ fn run_session_detail(
                     <p>
                         {session.run.status.to_string()}
                         " · "
-                        {session.run.mode.to_string()}
-                        " · cleanup "
+                        "cleanup "
                         {session.run.cleanup_status}
                     </p>
                 </div>
@@ -6112,7 +6089,6 @@ fn top_bar_automation_control(control: TopBarAutomation) -> AnyView {
             <div class="topbar-automation-group">
                 {auto_commit_control}
                 <form class="topbar-automation" method="post" action=start_action>
-                    <input type="hidden" name="mode" value="execute"/>
                     <span class="automation-status stopped">"Stopped"</span>
                     <button type="submit">"Start"</button>
                 </form>

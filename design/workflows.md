@@ -80,13 +80,13 @@ PATCHBAY_PROJECT, PATCHBAY_AGENT_ID, and PATCHBAY_CLAIMED_ITEM_ID are already se
 For the claimed item, omit project, agent, and item id arguments unless intentionally addressing another item.
 ```
 
-## Automation Modes
+## Automation Rule Behavior
 
-Patchbay supports automation modes for code-editing and refinement work. Automation rules either produce work items or consume work items. Work-consuming automation uses execute or refinement modes so every agent launched by a rule has an item to claim, comment on, finish, or release.
+Automation rules either produce work items or consume work items. Work-consuming automation does not classify behavior with a separate mode field. The rule prompt tells the launched agent how to handle the claimed item, including whether the expected outcome is implementation, refinement, verification, review preparation, or another project-specific workflow.
 
-Refinement-mode work-consuming automations are allowed to complete without finishing the claimed item. Successful refinement runs are for improving the work item itself: title, description, labels, comments, and routing. When a refinement-mode agent exits successfully while the item is still claimed, Patchbay releases the temporary claim back to the claimed-from state without adding `patchbay:automation-blocked`. Failed refinement runs still release with automation blocked so a broken prompt, missing context, or sandbox failure does not loop indefinitely.
+When a launched agent exits successfully while its item is still claimed, Patchbay releases the temporary claim back to the claimed-from state without adding `patchbay:automation-blocked`. This lets prompt-directed metadata, refinement, or verification consumers leave the underlying implementation work available for later automation. Failed runs still release with automation blocked so a broken prompt, missing context, or sandbox failure does not loop indefinitely. An agent can also call `patchbay item release --comment ...` explicitly when it needs human triage; agent-facing release keeps the blocking behavior.
 
-Patchbay ships editable default refinement-mode consumers for label-routed story preparation:
+Patchbay ships editable default consumers for label-routed story preparation:
 
 - a refiner for items labeled `needs-refinement`;
 - a verifier for items labeled `needs-verification`.
@@ -94,8 +94,6 @@ Patchbay ships editable default refinement-mode consumers for label-routed story
 Their prompts tell agents not to implement the work and not to call `patchbay item finish` for successful refinement or verification. The verifier may move an unnecessary item to a terminal workflow state only when that state is already evident from the project's user-defined workflow vocabulary; Patchbay does not hardcode a universal state value for that instruction.
 
 Review-style work that should not run automatically is modeled as work-producing automation: a manual evaluation creates a review item with the expensive prompt, and a work-consuming automation can later run an agent against that item.
-
-Mode-specific launch details are server policy. Agents should rely on the prepared prompt and environment, not infer policy from local files.
 
 For Codex-backed launches, Patchbay prepares a project-specific Codex home before the run starts. The project home contains generated Codex config and rules derived from project settings, while shared Codex auth and skills are linked from Patchbay's shared managed Codex home when present. The run sets `CODEX_HOME` and `CODEX_SQLITE_HOME` to that project home so settings, rules, logs, sessions, and SQLite state are isolated per project.
 

@@ -1150,7 +1150,6 @@ async fn create_trigger(driver: &WebDriver) -> Result<(), Report> {
                         activation: 'work_item_created',
                         effect: 'consume_work',
                         schedule: '@every 15s',
-                        mode: 'refine',
                         tool_name: 'codex',
                         prompt: 'Refine new work items.',
                         work_item_selector: '{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}}]}',

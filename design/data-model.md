@@ -77,7 +77,6 @@ An agent run records an automation process.
 Run data includes:
 
 - project and optional work item;
-- automation mode;
 - tool name;
 - status: `running`, `completed`, `failed`, or `cancelled`;
 - command and working directory;
@@ -111,13 +110,13 @@ Supported effects are:
 - `produce_work`: creates a work item from the automation prompt and does not launch an agent;
 - `consume_work`: schedules an agent run for a matching work item.
 
-Automation records include enabled state, mode, tool, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
+Automation records include enabled state, activation, effect, tool, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
 
 Default project automation rules are ordinary editable records. Patchbay creates and migrates these defaults:
 
-- `Claim open work`: consume-work, execute mode, selector `state=open` plus absence of `needs-refinement` and `needs-verification`.
-- `Refine needs-refinement work`: consume-work, refine mode, selector requiring the `needs-refinement` label.
-- `Verify needs-verification work`: consume-work, refine mode, selector requiring the `needs-verification` label.
+- `Claim open work`: consume-work, selector `state=open` plus absence of `needs-refinement` and `needs-verification`.
+- `Refine needs-refinement work`: consume-work, selector requiring the `needs-refinement` label.
+- `Verify needs-verification work`: consume-work, selector requiring the `needs-verification` label.
 
 The refiner and verifier prompts instruct agents to update item title, description, comments, and labels, remove the triggering label when complete, and leave the underlying implementation work unfinished for later automation or humans.
 

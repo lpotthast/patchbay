@@ -48,8 +48,6 @@ pub struct Model {
 
     pub schedule: String,
 
-    pub mode: String,
-
     pub tool_name: String,
 
     pub prompt: String,

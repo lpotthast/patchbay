@@ -849,10 +849,9 @@ async fn run_automation(command: AutomationCommand, context: ResolvedContext) ->
             output(args.json, &runs, || {
                 for run in &runs {
                     println!(
-                        "#{}\t{}\t{}\t{}\t{}\t{}",
+                        "#{}\t{}\t{}\t{}\t{}",
                         run.id,
                         run.status,
-                        run.mode,
                         run.tool_name,
                         run_token_usage_text(run),
                         run.result_summary

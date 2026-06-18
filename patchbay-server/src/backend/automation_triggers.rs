@@ -26,8 +26,8 @@ use crate::{
         storage::{Store, utc_now},
     },
     shared::view_models::{
-        AgentToolName, AutomationActivation, AutomationEffect, AutomationMode,
-        AutomationTriggerView, TriggerRunOutcome, default_automation_work_item_selector,
+        AgentToolName, AutomationActivation, AutomationEffect, AutomationTriggerView,
+        TriggerRunOutcome, default_automation_work_item_selector,
         needs_refinement_automation_work_item_selector,
         needs_verification_automation_work_item_selector,
     },
@@ -75,7 +75,6 @@ Do not call `patchbay item finish` for successful verification, and do not call 
 
 struct DefaultProjectAutomation {
     name: &'static str,
-    mode: AutomationMode,
     prompt: &'static str,
     selector: fn() -> Condition,
     priority: i64,
@@ -88,7 +87,6 @@ pub struct CreateAutomationTrigger {
     pub activation: AutomationActivation,
     pub effect: AutomationEffect,
     pub schedule: String,
-    pub mode: Option<AutomationMode>,
     pub tool_name: Option<AgentToolName>,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
@@ -130,16 +128,12 @@ pub async fn create_trigger(
     let project_id = projects::project_id(store, project_name).await?;
     let now = utc_now();
     let schedule = normalize_schedule(create.schedule)?;
-    let mode = create
-        .mode
-        .unwrap_or_else(|| default_mode_for_activation(create.activation));
     let work_item_selector = selector_for_activation(create.activation, create.work_item_selector)?;
     validate_trigger_configuration(
         &create.name,
         create.activation,
         create.effect,
         &schedule,
-        mode,
         work_item_selector.as_ref(),
         &create.prompt,
     )?;
@@ -169,7 +163,6 @@ pub async fn create_trigger(
         activation: Set(create.activation.as_storage().to_owned()),
         effect: Set(create.effect.as_storage().to_owned()),
         schedule: Set(schedule),
-        mode: Set(mode.as_storage().to_owned()),
         tool_name: Set(tool_name.as_storage().to_owned()),
         prompt: Set(create.prompt),
         work_item_selector: Set(selector_to_storage(work_item_selector.as_ref())?),
@@ -223,14 +216,12 @@ pub async fn update_trigger(
         .ok_or_else(|| report!("trigger {trigger_id} does not exist in this project"))?;
     let previous_kind = AutomationActivation::from_str(&existing.activation)?;
     let schedule = normalize_schedule(update.schedule)?;
-    let mode = default_mode_for_activation(update.activation);
     let work_item_selector = selector_for_activation(update.activation, update.work_item_selector)?;
     validate_trigger_configuration(
         &update.name,
         update.activation,
         update.effect,
         &schedule,
-        mode,
         work_item_selector.as_ref(),
         &update.prompt,
     )?;
@@ -264,7 +255,6 @@ pub async fn update_trigger(
     active.activation = Set(update.activation.as_storage().to_owned());
     active.effect = Set(update.effect.as_storage().to_owned());
     active.schedule = Set(schedule);
-    active.mode = Set(mode.as_storage().to_owned());
     active.tool_name = Set(default_tool.as_storage().to_owned());
     active.prompt = Set(update.prompt);
     active.work_item_selector = Set(selector_to_storage(work_item_selector.as_ref())?);
@@ -722,9 +712,6 @@ async fn trigger_has_consumable_work(
     automation: &AutomationTriggerView,
     work_item_id: Option<i64>,
 ) -> Result<bool> {
-    if !automation.mode.claims_work() {
-        return Ok(false);
-    }
     let Some(selector) = automation.work_item_selector.as_ref() else {
         return Ok(false);
     };
@@ -763,7 +750,6 @@ async fn run_trigger_once(
         store,
         project_name,
         StartAutomation {
-            mode: view.mode,
             tool: None,
             work_item_id,
             work_item_selector: view.work_item_selector.clone(),
@@ -953,7 +939,6 @@ pub(crate) fn validate_trigger_configuration(
     activation: AutomationActivation,
     effect: AutomationEffect,
     schedule: &str,
-    mode: AutomationMode,
     work_item_selector: Option<&Condition>,
     prompt: &str,
 ) -> Result<()> {
@@ -973,22 +958,10 @@ pub(crate) fn validate_trigger_configuration(
         }
         return Ok(());
     }
-    if !mode.claims_work() {
-        bail!("work-consuming automation must use execute or refine mode");
-    }
     if work_item_selector.is_none() {
         bail!("work-consuming automation requires a work item selector");
     }
     Ok(())
-}
-
-pub(crate) fn default_mode_for_activation(activation: AutomationActivation) -> AutomationMode {
-    match activation {
-        AutomationActivation::Manual => AutomationMode::Execute,
-        AutomationActivation::WorkItem => AutomationMode::Execute,
-        AutomationActivation::Cron => AutomationMode::Execute,
-        AutomationActivation::WorkItemCreated => AutomationMode::Refine,
-    }
 }
 
 pub(crate) fn default_work_item_selector() -> Condition {
@@ -1012,21 +985,18 @@ fn default_project_automations() -> [DefaultProjectAutomation; 3] {
     [
         DefaultProjectAutomation {
             name: DEFAULT_WORK_ITEM_AUTOMATION_NAME,
-            mode: AutomationMode::Execute,
             prompt: "",
             selector: default_work_item_selector,
             priority: 0,
         },
         DefaultProjectAutomation {
             name: DEFAULT_REFINEMENT_AUTOMATION_NAME,
-            mode: AutomationMode::Refine,
             prompt: DEFAULT_REFINEMENT_AUTOMATION_PROMPT,
             selector: default_refinement_work_item_selector,
             priority: REFINEMENT_AUTOMATION_PRIORITY,
         },
         DefaultProjectAutomation {
             name: DEFAULT_VERIFICATION_AUTOMATION_NAME,
-            mode: AutomationMode::Refine,
             prompt: DEFAULT_VERIFICATION_AUTOMATION_PROMPT,
             selector: default_verification_work_item_selector,
             priority: VERIFICATION_AUTOMATION_PRIORITY,
@@ -1077,7 +1047,6 @@ where
         activation: Set(AutomationActivation::WorkItem.as_storage().to_owned()),
         effect: Set(AutomationEffect::ConsumeWork.as_storage().to_owned()),
         schedule: Set(DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned()),
-        mode: Set(default.mode.as_storage().to_owned()),
         tool_name: Set(default_tool.to_owned()),
         prompt: Set(default.prompt.to_owned()),
         work_item_selector: Set(selector_to_storage(Some(&selector))?),
@@ -1200,7 +1169,6 @@ fn model_to_view(trigger: AutomationTriggerModel) -> Result<AutomationTriggerVie
         activation: AutomationActivation::from_str(&trigger.activation)?,
         effect: AutomationEffect::from_str(&trigger.effect)?,
         schedule: trigger.schedule,
-        mode: AutomationMode::from_str(&trigger.mode)?,
         tool_name: AgentToolName::from_str(&trigger.tool_name)?,
         prompt: trigger.prompt,
         work_item_selector: selector_from_storage(trigger.work_item_selector.as_deref())?,
@@ -1271,7 +1239,6 @@ mod tests {
         assert_eq!(automation.activation, AutomationActivation::WorkItem);
         assert_eq!(automation.effect, AutomationEffect::ConsumeWork);
         assert_eq!(automation.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
-        assert_eq!(automation.mode, AutomationMode::Execute);
         assert_eq!(
             automation.work_item_selector,
             Some(default_work_item_selector())
@@ -1284,7 +1251,6 @@ mod tests {
         assert_eq!(refiner.activation, AutomationActivation::WorkItem);
         assert_eq!(refiner.effect, AutomationEffect::ConsumeWork);
         assert_eq!(refiner.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
-        assert_eq!(refiner.mode, AutomationMode::Refine);
         assert_eq!(
             refiner.work_item_selector,
             Some(default_refinement_work_item_selector())
@@ -1306,7 +1272,6 @@ mod tests {
         assert_eq!(verifier.activation, AutomationActivation::WorkItem);
         assert_eq!(verifier.effect, AutomationEffect::ConsumeWork);
         assert_eq!(verifier.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
-        assert_eq!(verifier.mode, AutomationMode::Refine);
         assert_eq!(
             verifier.work_item_selector,
             Some(default_verification_work_item_selector())
@@ -1478,7 +1443,6 @@ mod tests {
             activation: AutomationActivation::WorkItem,
             effect: AutomationEffect::ConsumeWork,
             schedule: DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned(),
-            mode: AutomationMode::Execute,
             tool_name: AgentToolName::Codex,
             prompt: String::new(),
             work_item_selector: Some(default_work_item_selector()),
@@ -1506,7 +1470,6 @@ mod tests {
                 activation: AutomationActivation::WorkItemCreated,
                 effect: AutomationEffect::ConsumeWork,
                 schedule: "@every 15s".to_owned(),
-                mode: None,
                 tool_name: None,
                 prompt: "Refine this new work item.".to_owned(),
                 work_item_selector: Some(default_work_item_selector()),
@@ -1552,6 +1515,11 @@ mod tests {
         assert_eq!(trigger_runs[0].id, run.id);
         assert_eq!(item.claimed_by, None);
         assert_eq!(item.state.as_deref(), Some("open"));
+        assert!(
+            item.labels
+                .iter()
+                .all(|label| label.key != crate::shared::view_models::AUTOMATION_BLOCKED_LABEL_KEY)
+        );
     }
 
     #[tokio::test]
@@ -1566,7 +1534,6 @@ mod tests {
                 activation: AutomationActivation::Manual,
                 effect: AutomationEffect::ProduceWork,
                 schedule: "@every 15s".to_owned(),
-                mode: None,
                 tool_name: None,
                 prompt: "Perform an expensive deep review.".to_owned(),
                 work_item_selector: None,

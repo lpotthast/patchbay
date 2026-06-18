@@ -51,8 +51,6 @@ pub struct Model {
     #[ck_update_model(exclude)]
     pub trigger_name: Option<String>,
 
-    pub mode: String,
-
     pub tool_name: String,
 
     #[ck_create_model(exclude)]

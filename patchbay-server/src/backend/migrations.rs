@@ -277,6 +277,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddAutomationRunCommitOutcomes),
             Box::new(AddAutomationRunTokenUsage),
             Box::new(AddRefinerVerifierAutomations),
+            Box::new(RemoveAutomationModes),
         ]
     }
 }
@@ -2308,6 +2309,57 @@ impl MigrationTrait for AddRefinerVerifierAutomations {
         )
         .await?;
         update_default_open_work_selector(manager, OLD_DEFAULT_WORK_ITEM_SELECTOR).await
+    }
+}
+
+struct RemoveAutomationModes;
+
+impl MigrationName for RemoveAutomationModes {
+    fn name(&self) -> &str {
+        "m20260618_000031_remove_automation_modes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RemoveAutomationModes {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "agent_runs_read_view").await?;
+        drop_read_view(manager, "automation_triggers_read_view").await?;
+        drop_column_if_present(manager, "agent_runs", "mode").await?;
+        drop_column_if_present(manager, "automation_triggers", "mode").await?;
+        create_read_view(manager, "agent_runs", "agent_runs_read_view").await?;
+        create_read_view(
+            manager,
+            "automation_triggers",
+            "automation_triggers_read_view",
+        )
+        .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "agent_runs_read_view").await?;
+        drop_read_view(manager, "automation_triggers_read_view").await?;
+        add_column_if_missing(
+            manager,
+            "agent_runs",
+            "mode",
+            "TEXT NOT NULL DEFAULT 'execute'",
+        )
+        .await?;
+        add_column_if_missing(
+            manager,
+            "automation_triggers",
+            "mode",
+            "TEXT NOT NULL DEFAULT 'execute'",
+        )
+        .await?;
+        create_read_view(manager, "agent_runs", "agent_runs_read_view").await?;
+        create_read_view(
+            manager,
+            "automation_triggers",
+            "automation_triggers_read_view",
+        )
+        .await
     }
 }
 

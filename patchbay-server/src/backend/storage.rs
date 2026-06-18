@@ -155,6 +155,7 @@ mod tests {
             "m20260617_000028_add_automation_run_commit_outcomes",
             "m20260617_000029_add_automation_run_token_usage",
             "m20260618_000030_add_refiner_verifier_automations",
+            "m20260618_000031_remove_automation_modes",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());
