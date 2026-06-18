@@ -78,6 +78,7 @@ Run data includes:
 
 - project and optional work item;
 - tool name;
+- automation trigger origin, including trigger id and the trigger name as it existed when the run was created;
 - run mutability: `mutating` or `read_only`;
 - status: `running`, `completed`, `failed`, or `cancelled`;
 - command and working directory;
@@ -92,6 +93,8 @@ Run data includes:
 - timestamps.
 
 Run logs are read through server endpoints. The log file path is an implementation detail and should not be handed to agents as the primary interface.
+
+Claimed work item views may include the active Patchbay run that owns the claim and the run's automation trigger origin when the claimant is a structurally linked `patchbay-run-*`. Readers must not infer a claim source from an agent id alone when the run is not linked to the same project item.
 
 ## Automation
 

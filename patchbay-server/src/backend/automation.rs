@@ -3891,6 +3891,7 @@ mod tests {
             claimed_by: Some("patchbay-run-1".to_owned()),
             claimed_at: None,
             claim_expires_at: None,
+            claim_source: None,
             finished_at: None,
             agent_model_override: None,
             agent_reasoning_effort_override: None,

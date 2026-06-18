@@ -40,8 +40,8 @@ use crate::{
         FEEDBACK_REQUESTED_LABEL_KEY, ProjectGitStatusView, ProjectLabelView,
         ProjectMemoryEventRefView, ProjectMemoryEventView, ProjectSettingsView,
         ProjectSystemPromptEventView, ProjectView, RevertStrategy, RunLogView, STATE_LABEL_KEY,
-        SwimLaneView, UiEvent, WorkItemLabelView, WorkItemStateView, WorkItemView,
-        WorkspaceEditorView, WorkspaceMode,
+        SwimLaneView, UiEvent, WorkItemClaimSourceView, WorkItemLabelView, WorkItemStateView,
+        WorkItemView, WorkspaceEditorView, WorkspaceMode,
     },
 };
 #[cfg(not(feature = "ssr"))]
@@ -2160,6 +2160,7 @@ fn run_log_content(page: RunLogPage) -> AnyView {
     let title = format!("Run #{}", run_log.run.id);
     let summary = run_result_summary(&run_log.run);
     let origin = run_origin_label(&run_log.run);
+    let work_item = run_work_item_link(&project, run_log.run.work_item_id);
     let command = recorded_field(&run_log.run.command);
     let run_href = format!(
         "/projects/{}/automation/runs/{}/log",
@@ -2222,6 +2223,12 @@ fn run_log_content(page: RunLogPage) -> AnyView {
                             <>
                                 <dt>"source"</dt>
                                 <dd>{origin}</dd>
+                            </>
+                        })}
+                        {work_item.map(|work_item| view! {
+                            <>
+                                <dt>"item"</dt>
+                                <dd>{work_item}</dd>
                             </>
                         })}
                         <dt>"result"</dt>
@@ -4651,6 +4658,7 @@ fn LiveBoardItems(
             && matches!(
                 event,
                 UiEvent::WorkItemChanged { .. }
+                    | UiEvent::AgentRunChanged { .. }
                     | UiEvent::SwimLaneChanged { .. }
                     | UiEvent::WorkItemStateChanged { .. }
             )
@@ -5189,6 +5197,7 @@ fn RunSessionsPanel(
                 let is_active = session.active;
                 let summary = run_result_summary(&session.run);
                 let origin = run_origin_label(&session.run);
+                let item = run_item_label(&session.run);
                 let tokens = session.run.token_usage.map(run_token_usage_label);
                 let status_class = run_status_class(session.run.status);
                 let selected_signal = selected_run_id;
@@ -5208,6 +5217,7 @@ fn RunSessionsPanel(
                         <div class="session-head">
                             <strong>"#" {run_id}</strong>
                             <span>{session.run.status.to_string()}</span>
+                            {item.map(|item| view! { <span>{item}</span> })}
                             {origin.map(|origin| view! { <span>{origin}</span> })}
                             {tokens.map(|tokens| view! { <span>{tokens}</span> })}
                             {is_active.then(|| view! { <span class="live-badge">"active"</span> })}
@@ -5328,6 +5338,20 @@ fn run_origin_label(run: &AgentRunView) -> Option<String> {
     })
 }
 
+fn run_item_label(run: &AgentRunView) -> Option<String> {
+    run.work_item_id.map(|item_id| format!("item #{item_id}"))
+}
+
+fn run_work_item_link(project: &str, item_id: Option<i64>) -> Option<AnyView> {
+    item_id.map(|item_id| {
+        let href = format!("/projects/{}/items/{}", encode_path(project), item_id);
+        view! {
+            <a class="run-item-link" href=href>"Item #" {item_id}</a>
+        }
+        .into_any()
+    })
+}
+
 fn recorded_field(value: &str) -> String {
     if value.trim().is_empty() {
         "not recorded".to_owned()
@@ -5363,6 +5387,7 @@ fn run_session_detail(
     let token_usage = run_token_usage_text(&session.run);
     let summary = run_result_summary(&session.run);
     let origin = run_origin_label(&session.run);
+    let work_item = run_work_item_link(project, session.run.work_item_id);
     let command = recorded_field(&session.run.command);
     let working_dir = run_workspace_actions(project, &session.run, workspace_editors, href.clone());
     let status_class = run_status_class(session.run.status);
@@ -5390,6 +5415,12 @@ fn run_session_detail(
                     <>
                         <dt>"source"</dt>
                         <dd>{origin}</dd>
+                    </>
+                })}
+                {work_item.map(|work_item| view! {
+                    <>
+                        <dt>"item"</dt>
+                        <dd>{work_item}</dd>
                     </>
                 })}
                 <dt>"model"</dt>
@@ -6091,7 +6122,13 @@ fn item_card(project: String, item: WorkItemView) -> impl IntoView + 'static {
         } else {
             "Claimed"
         };
-        claim_badge(&project, agent, status, item.claimed_at.clone())
+        claim_badge_with_source(
+            &project,
+            agent,
+            status,
+            item.claimed_at.clone(),
+            item.claim_source.clone(),
+        )
     });
 
     view! {
@@ -6404,8 +6441,23 @@ fn claim_badge(
     status: &'static str,
     claimed_at: Option<String>,
 ) -> AnyView {
+    claim_badge_with_source(project, agent, status, claimed_at, None)
+}
+
+fn claim_badge_with_source(
+    project: &str,
+    agent: String,
+    status: &'static str,
+    claimed_at: Option<String>,
+    claim_source: Option<WorkItemClaimSourceView>,
+) -> AnyView {
     let elapsed = claim_elapsed_timer(claimed_at);
-    if let Some(run_id) = infer_patchbay_run_id(&agent) {
+    let source_label = claim_source_label(claim_source.as_ref());
+    let run_id = claim_source
+        .as_ref()
+        .map(|source| source.run_id)
+        .or_else(|| infer_patchbay_run_id(&agent));
+    if let Some(run_id) = run_id {
         let href = format!(
             "/projects/{}/automation/runs/{}/log",
             encode_path(project),
@@ -6416,6 +6468,9 @@ fn claim_badge(
                 <span class="claim-dot" aria-hidden="true"></span>
                 <span>{status}</span>
                 <span class="claim-agent">{agent}</span>
+                {source_label.map(|source| view! {
+                    <span class="claim-source" title="Automation source">{source}</span>
+                })}
                 {elapsed}
             </a>
         }
@@ -6427,10 +6482,25 @@ fn claim_badge(
             <span class="claim-dot" aria-hidden="true"></span>
             <span>{status}</span>
             <span class="claim-agent">{agent}</span>
+            {source_label.map(|source| view! {
+                <span class="claim-source" title="Automation source">{source}</span>
+            })}
             {elapsed}
         </div>
     }
     .into_any()
+}
+
+fn claim_source_label(source: Option<&WorkItemClaimSourceView>) -> Option<String> {
+    source.map(|source| {
+        source
+            .trigger_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("via {name}"))
+            .unwrap_or_else(|| "via direct run".to_owned())
+    })
 }
 
 fn claim_elapsed_timer(claimed_at: Option<String>) -> AnyView {

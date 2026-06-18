@@ -25,12 +25,12 @@ The main workflow surface should make these states easy to inspect:
 
 - backlog and all work;
 - project-defined swim-lanes based on lane filters and lane ordering;
-- in-progress work and claimant, including a frontend-derived elapsed claim timer from the claim start time;
+- in-progress work and claimant, including the triggering automation source when available and a frontend-derived elapsed claim timer from the claim start time;
 - recent comments and progress;
 - automation status;
 - stale or blocked work;
 - feedback-requested work that is waiting for a user answer;
-- run logs and run outcomes, including live output for active runs, active-run cancellation, commit outcome, and created commit SHA visibility.
+- run logs and run outcomes, including linked operated work items, live output for active runs, active-run cancellation, commit outcome, and created commit SHA visibility.
 - per-run Codex token usage when reported by the agent runtime.
 - Patchbay-owned workflow labels such as `state`, `patchbay:claimed-from-state`, `patchbay:automation-blocked`, and `patchbay:feedback-requested`.
 

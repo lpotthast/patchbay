@@ -757,12 +757,20 @@ pub struct WorkItemView {
     pub claimed_by: Option<String>,
     pub claimed_at: Option<String>,
     pub claim_expires_at: Option<String>,
+    pub claim_source: Option<WorkItemClaimSourceView>,
     pub finished_at: Option<String>,
     pub agent_model_override: Option<String>,
     pub agent_reasoning_effort_override: Option<AgentReasoningEffort>,
     pub created_at: String,
     pub updated_at: String,
     pub comment_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkItemClaimSourceView {
+    pub run_id: i64,
+    pub trigger_id: Option<i64>,
+    pub trigger_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -1527,10 +1527,24 @@ a.claim-badge {
   white-space: nowrap;
 }
 
+.claim-source {
+  min-width: 0;
+  max-width: 22ch;
+  overflow: hidden;
+  color: #6f4309;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .claim-elapsed {
   min-width: 4ch;
   color: #6f4309;
   font-variant-numeric: tabular-nums;
+}
+
+.run-item-link {
+  font-weight: 760;
 }
 
 .project-settings {

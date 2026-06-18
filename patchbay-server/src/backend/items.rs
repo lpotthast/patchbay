@@ -11,6 +11,7 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     backend::{
         entities::{
+            agent_run::{self, AgentRun, AgentRunModel},
             comment::{CommentActiveModel, CommentModel},
             work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
             work_item_event,
@@ -24,8 +25,8 @@ use crate::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentReasoningEffort, AuthorType,
         CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL, CommentView,
         DeleteWorkItemLabelResponse, FEEDBACK_REQUESTED_LABEL_KEY, FINISHED_STATE_LABEL,
-        ProjectLabelView, RecoveredClaimView, STATE_LABEL_KEY, WorkItemEventView,
-        WorkItemLabelView, WorkItemView,
+        ProjectLabelView, RecoveredClaimView, STATE_LABEL_KEY, WorkItemClaimSourceView,
+        WorkItemEventView, WorkItemLabelView, WorkItemView,
     },
 };
 
@@ -1504,6 +1505,8 @@ async fn models_to_views(
     let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
     let mut labels = labels_for_items(store.db().as_ref(), project_id, &item_ids).await?;
     let mut comment_counts = comment_counts_for_items(store.db().as_ref(), &item_ids).await?;
+    let mut claim_sources =
+        claim_sources_for_items(store.db().as_ref(), project_id, &items).await?;
 
     let mut views = Vec::with_capacity(items.len());
     for item in items {
@@ -1512,6 +1515,7 @@ async fn models_to_views(
             item,
             labels.remove(&item_id).unwrap_or_default(),
             comment_counts.remove(&item_id).unwrap_or(0),
+            claim_sources.remove(&item_id),
         )?);
     }
     Ok(views)
@@ -1523,7 +1527,14 @@ async fn model_to_view(store: &Store, item: WorkItemModel) -> Result<WorkItemVie
         .await?
         .remove(&item.id)
         .unwrap_or(0);
-    work_item_view(item, labels, comment_count)
+    let mut claim_sources = claim_sources_for_items(
+        store.db().as_ref(),
+        item.project_id,
+        std::slice::from_ref(&item),
+    )
+    .await?;
+    let claim_source = claim_sources.remove(&item.id);
+    work_item_view(item, labels, comment_count, claim_source)
 }
 
 async fn labels_for_items<C>(
@@ -1595,10 +1606,64 @@ where
     Ok(counts)
 }
 
+async fn claim_sources_for_items<C>(
+    conn: &C,
+    project_id: i64,
+    items: &[WorkItemModel],
+) -> Result<BTreeMap<i64, WorkItemClaimSourceView>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let run_to_item = items
+        .iter()
+        .filter_map(|item| {
+            let run_id = patchbay_run_id_from_agent(item.claimed_by.as_deref()?)?;
+            Some((run_id, item.id))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if run_to_item.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let run_ids = run_to_item.keys().copied().collect::<Vec<_>>();
+    let runs = AgentRun::find()
+        .filter(agent_run::Column::ProjectId.eq(project_id))
+        .filter(agent_run::Column::Id.is_in(run_ids))
+        .all(conn)
+        .await
+        .context("failed to list claimed item agent runs")?;
+
+    let mut claim_sources = BTreeMap::new();
+    for run in runs {
+        let Some(item_id) = run_to_item.get(&run.id).copied() else {
+            continue;
+        };
+        if run.work_item_id != Some(item_id) {
+            continue;
+        }
+        claim_sources.insert(item_id, claim_source_from_run(run));
+    }
+
+    Ok(claim_sources)
+}
+
+fn claim_source_from_run(run: AgentRunModel) -> WorkItemClaimSourceView {
+    WorkItemClaimSourceView {
+        run_id: run.id,
+        trigger_id: run.trigger_id,
+        trigger_name: projects::normalize_optional(run.trigger_name),
+    }
+}
+
+fn patchbay_run_id_from_agent(agent_id: &str) -> Option<i64> {
+    agent_id.strip_prefix("patchbay-run-")?.parse().ok()
+}
+
 fn work_item_view(
     item: WorkItemModel,
     labels: Vec<WorkItemLabelView>,
     comment_count: i64,
+    claim_source: Option<WorkItemClaimSourceView>,
 ) -> Result<WorkItemView> {
     let state = item_labels::current_state(&labels);
 
@@ -1613,6 +1678,7 @@ fn work_item_view(
         claimed_by: item.claimed_by,
         claimed_at: item.claimed_at,
         claim_expires_at: item.claim_expires_at,
+        claim_source,
         finished_at: item.finished_at,
         agent_model_override: projects::normalize_optional(item.agent_model_override),
         agent_reasoning_effort_override: item
@@ -2442,6 +2508,168 @@ mod tests {
         assert_eq!(opened.state.as_deref(), Some("open"));
         assert_eq!(claimed.id, item.id);
         assert_eq!(claimed.claimed_by.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn claimed_items_include_verified_automation_source() {
+        let (_temp, store) = test_store().await;
+        let item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Refine me".to_owned(),
+                description: "A trigger should be visible while claimed".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let now = utc_now();
+        let run = agent_run::ActiveModel {
+            project_id: Set(item.project_id),
+            work_item_id: Set(Some(item.id)),
+            memory_event_id: Set(None),
+            trigger_id: Set(Some(7)),
+            trigger_name: Set(Some("Refine queued item".to_owned())),
+            tool_name: Set("codex".to_owned()),
+            mutability: Set("read_only".to_owned()),
+            status: Set("running".to_owned()),
+            command: Set(String::new()),
+            working_dir: Set(String::new()),
+            worktree_path: Set(None),
+            branch_name: Set(None),
+            process_id: Set(None),
+            exit_code: Set(None),
+            log_path: Set(None),
+            prompt_path: Set(None),
+            agent_model: Set(None),
+            agent_reasoning_effort: Set(None),
+            input_tokens: Set(None),
+            cached_input_tokens: Set(None),
+            output_tokens: Set(None),
+            commit_required: Set(false),
+            commit_outcome: Set("not_evaluated".to_owned()),
+            commit_shas: Set("[]".to_owned()),
+            pr_requested: Set(false),
+            pr_url: Set(None),
+            cleanup_status: Set("not_applicable".to_owned()),
+            worktree_cleaned_at: Set(None),
+            result_summary: Set(String::new()),
+            started_at: Set(Some(now.clone())),
+            finished_at: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(store.db().as_ref())
+        .await
+        .unwrap();
+        let agent_id = format!("patchbay-run-{}", run.id);
+
+        claim_specific_item(&store, "demo", item.id, &agent_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let item = get_item(&store, "demo", item.id).await.unwrap();
+        let listed = list_items(&store, "demo", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == item.id)
+            .unwrap();
+
+        for view in [item, listed] {
+            let claim_source = view.claim_source.expect("claim source should be present");
+            assert_eq!(claim_source.run_id, run.id);
+            assert_eq!(claim_source.trigger_id, Some(7));
+            assert_eq!(
+                claim_source.trigger_name.as_deref(),
+                Some("Refine queued item")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_items_ignore_unlinked_patchbay_run_claimants() {
+        let (_temp, store) = test_store().await;
+        let item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Claim me".to_owned(),
+                description: "Source should not be guessed from a mismatched run".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let other = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Other".to_owned(),
+                description: "The run is structurally linked here instead".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        let now = utc_now();
+        let run = agent_run::ActiveModel {
+            project_id: Set(item.project_id),
+            work_item_id: Set(Some(other.id)),
+            memory_event_id: Set(None),
+            trigger_id: Set(Some(8)),
+            trigger_name: Set(Some("Wrong source".to_owned())),
+            tool_name: Set("codex".to_owned()),
+            mutability: Set("mutating".to_owned()),
+            status: Set("running".to_owned()),
+            command: Set(String::new()),
+            working_dir: Set(String::new()),
+            worktree_path: Set(None),
+            branch_name: Set(None),
+            process_id: Set(None),
+            exit_code: Set(None),
+            log_path: Set(None),
+            prompt_path: Set(None),
+            agent_model: Set(None),
+            agent_reasoning_effort: Set(None),
+            input_tokens: Set(None),
+            cached_input_tokens: Set(None),
+            output_tokens: Set(None),
+            commit_required: Set(false),
+            commit_outcome: Set("not_evaluated".to_owned()),
+            commit_shas: Set("[]".to_owned()),
+            pr_requested: Set(false),
+            pr_url: Set(None),
+            cleanup_status: Set("not_applicable".to_owned()),
+            worktree_cleaned_at: Set(None),
+            result_summary: Set(String::new()),
+            started_at: Set(Some(now.clone())),
+            finished_at: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(store.db().as_ref())
+        .await
+        .unwrap();
+        let agent_id = format!("patchbay-run-{}", run.id);
+
+        claim_specific_item(&store, "demo", item.id, &agent_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let item = get_item(&store, "demo", item.id).await.unwrap();
+
+        assert_eq!(item.claimed_by.as_deref(), Some(agent_id.as_str()));
+        assert!(item.claim_source.is_none());
     }
 
     #[tokio::test]
