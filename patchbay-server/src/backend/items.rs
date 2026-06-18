@@ -11,21 +11,20 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     backend::{
         entities::{
-            agent_run::{self, AgentRun, AgentRunModel},
             work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
             work_item_event,
             work_item_label::{self, WorkItemLabel, WorkItemLabelActiveModel, WorkItemLabelModel},
         },
         events, item_labels, projects,
         storage::{Store, utc_now},
-        work_item_comments, work_item_events, work_item_labels,
+        work_item_comments, work_item_events, work_item_labels, work_items,
     },
     shared::view_models::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentReasoningEffort, AuthorType,
         CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL, CommentView,
         DeleteWorkItemLabelResponse, FEEDBACK_REQUESTED_LABEL_KEY, FINISHED_STATE_LABEL,
-        ProjectLabelView, RecoveredClaimView, STATE_LABEL_KEY, WorkItemClaimSourceView,
-        WorkItemEventView, WorkItemLabelView, WorkItemView,
+        ProjectLabelView, RecoveredClaimView, STATE_LABEL_KEY, WorkItemEventView,
+        WorkItemLabelView, WorkItemView,
     },
 };
 
@@ -165,7 +164,7 @@ pub async fn list_items(
         .all(store.db().as_ref())
         .await
         .context("failed to list work items")?;
-    models_to_views(store, project_id, items).await
+    work_items::models_to_views(store, project_id, items).await
 }
 
 pub async fn count_items_outside_work_item_states(
@@ -232,15 +231,15 @@ pub async fn item_matches_condition(
 ) -> Result<bool> {
     item_labels::validate_condition(condition)?;
     let project_id = projects::project_id(store, project_name).await?;
-    let item = get_item_model(store, project_id, item_id).await?;
+    let item = work_items::get(store.db().as_ref(), project_id, item_id).await?;
     let labels = work_item_labels::for_item(store.db().as_ref(), project_id, item.id).await?;
     item_labels::automation_selector_matches(condition, &labels)
 }
 
 pub async fn get_item(store: &Store, project_name: &str, item_id: i64) -> Result<WorkItemView> {
     let project_id = projects::project_id(store, project_name).await?;
-    let item = get_item_model(store, project_id, item_id).await?;
-    model_to_view(store, item).await
+    let item = work_items::get(store.db().as_ref(), project_id, item_id).await?;
+    work_items::model_to_view(store, item).await
 }
 
 pub async fn create_item(
@@ -296,7 +295,7 @@ pub async fn create_item(
     txn.commit().await.context("failed to commit item create")?;
     events::publish_work_item_changed(project_name, item.id);
 
-    model_to_view(store, item).await
+    work_items::model_to_view(store, item).await
 }
 
 pub async fn update_item(
@@ -330,7 +329,7 @@ pub async fn update_item(
         .begin()
         .await
         .context("failed to start item update")?;
-    let existing = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let existing = work_items::get(&txn, project_id, item_id).await?;
     check_expected_version(update.expect_version, existing.version)?;
 
     let title = update.title.unwrap_or_else(|| existing.title.clone());
@@ -391,7 +390,7 @@ pub async fn update_item(
     txn.commit().await.context("failed to commit item update")?;
     events::publish_work_item_changed(project_name, item_id);
 
-    model_to_view(store, updated).await
+    work_items::model_to_view(store, updated).await
 }
 
 pub async fn move_item(
@@ -566,7 +565,7 @@ pub async fn claim_specific_item(
         .begin()
         .await
         .context("failed to start specific item claim")?;
-    let existing = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let existing = work_items::get(&txn, project_id, item_id).await?;
     if existing.claimed_by.is_some() || existing.finished_at.is_some() {
         return commit_claim_transaction(
             store,
@@ -661,7 +660,7 @@ pub async fn progress_item(
         .begin()
         .await
         .context("failed to start item progress")?;
-    let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let item = work_items::get(&txn, project_id, item_id).await?;
     ensure_active_claim(&item, agent_id)?;
 
     let comment = work_item_comments::insert_in_tx(
@@ -708,7 +707,7 @@ pub async fn finish_item(
         .begin()
         .await
         .context("failed to start item finish")?;
-    let existing = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let existing = work_items::get(&txn, project_id, item_id).await?;
     ensure_active_claim(&existing, agent_id)?;
 
     let now = utc_now();
@@ -752,7 +751,7 @@ pub async fn finish_item(
     txn.commit().await.context("failed to commit item finish")?;
     events::publish_work_item_changed(project_name, item_id);
 
-    model_to_view(store, updated).await
+    work_items::model_to_view(store, updated).await
 }
 
 pub async fn delete_item(store: &Store, project_name: &str, item_id: i64) -> Result<()> {
@@ -762,7 +761,7 @@ pub async fn delete_item(store: &Store, project_name: &str, item_id: i64) -> Res
         .begin()
         .await
         .context("failed to start item delete")?;
-    get_item_model_in_tx(&txn, project_id, item_id).await?;
+    work_items::get(&txn, project_id, item_id).await?;
 
     work_item_events::record_event_in_tx(
         &txn,
@@ -787,7 +786,7 @@ pub async fn list_item_labels(
     item_id: i64,
 ) -> Result<Vec<WorkItemLabelView>> {
     let project_id = projects::project_id(store, project_name).await?;
-    get_item_model(store, project_id, item_id).await?;
+    work_items::get(store.db().as_ref(), project_id, item_id).await?;
     work_item_labels::for_item(store.db().as_ref(), project_id, item_id).await
 }
 
@@ -848,7 +847,7 @@ pub async fn add_label(
         .begin()
         .await
         .context("failed to start label add")?;
-    let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let item = work_items::get(&txn, project_id, item_id).await?;
     check_expected_version(expect_version, item.version)?;
     if WorkItemLabel::find()
         .filter(work_item_label::Column::WorkItemId.eq(item_id))
@@ -862,7 +861,7 @@ pub async fn add_label(
     }
 
     work_item_labels::insert_in_tx(&txn, project_id, item_id, &key, value.as_deref()).await?;
-    let updated = touch_item_in_tx(&txn, item).await?;
+    let updated = work_items::touch(&txn, item).await?;
     let body = format!(
         "Added label {}",
         item_labels::format_label(&key, value.as_deref())
@@ -871,7 +870,7 @@ pub async fn add_label(
         .await?;
     txn.commit().await.context("failed to commit label add")?;
     events::publish_work_item_changed(project_name, item_id);
-    model_to_view(store, updated).await
+    work_items::model_to_view(store, updated).await
 }
 
 pub async fn update_label(
@@ -893,7 +892,7 @@ pub async fn update_label(
         .begin()
         .await
         .context("failed to start label update")?;
-    let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let item = work_items::get(&txn, project_id, item_id).await?;
     check_expected_version(expect_version, item.version)?;
     let existing = get_label_model_in_tx(&txn, project_id, item_id, label_id).await?;
     let key = match key {
@@ -925,7 +924,7 @@ pub async fn update_label(
         .update(&txn)
         .await
         .context("failed to update label")?;
-    let updated = touch_item_in_tx(&txn, item).await?;
+    let updated = work_items::touch(&txn, item).await?;
     let body = format!(
         "Updated label {}",
         item_labels::format_label(&key, value.as_deref())
@@ -936,7 +935,7 @@ pub async fn update_label(
         .await
         .context("failed to commit label update")?;
     events::publish_work_item_changed(project_name, item_id);
-    model_to_view(store, updated).await
+    work_items::model_to_view(store, updated).await
 }
 
 pub async fn delete_label(
@@ -952,7 +951,7 @@ pub async fn delete_label(
         .begin()
         .await
         .context("failed to start label delete")?;
-    let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let item = work_items::get(&txn, project_id, item_id).await?;
     check_expected_version(expect_version, item.version)?;
     let label = get_label_model_in_tx(&txn, project_id, item_id, label_id).await?;
     if label.key == STATE_LABEL_KEY {
@@ -966,14 +965,14 @@ pub async fn delete_label(
         .exec(&txn)
         .await
         .context("failed to delete label")?;
-    let updated = touch_item_in_tx(&txn, item).await?;
+    let updated = work_items::touch(&txn, item).await?;
     work_item_events::record_event_in_tx(&txn, project_id, Some(item_id), "label_deleted", &body)
         .await?;
     txn.commit()
         .await
         .context("failed to commit label delete")?;
     events::publish_work_item_changed(project_name, item_id);
-    let work_item = model_to_view(store, updated).await?;
+    let work_item = work_items::model_to_view(store, updated).await?;
     Ok(DeleteWorkItemLabelResponse {
         deleted: true,
         label_id,
@@ -989,7 +988,7 @@ pub async fn list_events(
 ) -> Result<Vec<WorkItemEventView>> {
     let project_id = projects::project_id(store, project_name).await?;
     if let Some(item_id) = item_id {
-        get_item_model(store, project_id, item_id).await?;
+        work_items::get(store.db().as_ref(), project_id, item_id).await?;
     }
 
     let mut query = work_item_event::Entity::find()
@@ -1091,7 +1090,7 @@ async fn return_claim_to_source_state(
 ) -> Result<WorkItemView> {
     let project_id = projects::project_id(store, project_name).await?;
     let txn = store.db().begin().await.context(mode.start_context())?;
-    let existing = get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let existing = work_items::get(&txn, project_id, item_id).await?;
     ensure_active_claim(&existing, agent_id)?;
     let labels = work_item_labels::for_item(&txn, project_id, item_id).await?;
     let release_state = item_labels::release_state_from_claim_labels(&labels);
@@ -1163,7 +1162,7 @@ async fn return_claim_to_source_state(
     txn.commit().await.context(mode.commit_context())?;
     events::publish_work_item_changed(project_name, item_id);
 
-    model_to_view(store, updated).await
+    work_items::model_to_view(store, updated).await
 }
 
 async fn unclaimed_items_in_claim_order<C>(conn: &C, project_id: i64) -> Result<Vec<WorkItemModel>>
@@ -1204,35 +1203,6 @@ fn labels_for_item(
         .get(&item_id)
         .map(Vec::as_slice)
         .unwrap_or(&[])
-}
-
-pub(crate) async fn get_item_model(
-    store: &Store,
-    project_id: i64,
-    item_id: i64,
-) -> Result<WorkItemModel> {
-    WorkItem::find_by_id(item_id)
-        .filter(work_item::Column::ProjectId.eq(project_id))
-        .one(store.db().as_ref())
-        .await
-        .context_with(|| format!("failed to load item {item_id}"))?
-        .ok_or_else(|| report!("item {item_id} does not exist in this project"))
-}
-
-pub(crate) async fn get_item_model_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-) -> Result<WorkItemModel>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    WorkItem::find_by_id(item_id)
-        .filter(work_item::Column::ProjectId.eq(project_id))
-        .one(conn)
-        .await
-        .context_with(|| format!("failed to load item {item_id}"))?
-        .ok_or_else(|| report!("item {item_id} does not exist in this project"))
 }
 
 async fn get_label_model_in_tx<C>(
@@ -1352,7 +1322,7 @@ async fn commit_claim_transaction(
     };
 
     events::publish_work_item_changed(project_name, item.id);
-    Ok(Some(model_to_view(store, item).await?))
+    Ok(Some(work_items::model_to_view(store, item).await?))
 }
 
 async fn record_claim_in_tx<C>(
@@ -1400,153 +1370,7 @@ where
         comment_body.as_str(),
     )
     .await?;
-    get_item_model_in_tx(conn, project_id, item_id).await
-}
-
-async fn touch_item_in_tx<C>(conn: &C, item: WorkItemModel) -> Result<WorkItemModel>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let version = item.version;
-    let mut active: WorkItemActiveModel = item.into();
-    active.version = Set(version + 1);
-    active.updated_at = Set(utc_now());
-    Ok(active
-        .update(conn)
-        .await
-        .context("failed to update item version")?)
-}
-
-async fn models_to_views(
-    store: &Store,
-    project_id: i64,
-    items: Vec<WorkItemModel>,
-) -> Result<Vec<WorkItemView>> {
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
-    let mut labels =
-        work_item_labels::for_items(store.db().as_ref(), project_id, &item_ids).await?;
-    let mut comment_counts =
-        work_item_comments::counts_for_items(store.db().as_ref(), &item_ids).await?;
-    let mut claim_sources =
-        claim_sources_for_items(store.db().as_ref(), project_id, &items).await?;
-
-    let mut views = Vec::with_capacity(items.len());
-    for item in items {
-        let item_id = item.id;
-        views.push(work_item_view(
-            item,
-            labels.remove(&item_id).unwrap_or_default(),
-            comment_counts.remove(&item_id).unwrap_or(0),
-            claim_sources.remove(&item_id),
-        )?);
-    }
-    Ok(views)
-}
-
-async fn model_to_view(store: &Store, item: WorkItemModel) -> Result<WorkItemView> {
-    let labels = work_item_labels::for_item(store.db().as_ref(), item.project_id, item.id).await?;
-    let comment_count = work_item_comments::counts_for_items(store.db().as_ref(), &[item.id])
-        .await?
-        .remove(&item.id)
-        .unwrap_or(0);
-    let mut claim_sources = claim_sources_for_items(
-        store.db().as_ref(),
-        item.project_id,
-        std::slice::from_ref(&item),
-    )
-    .await?;
-    let claim_source = claim_sources.remove(&item.id);
-    work_item_view(item, labels, comment_count, claim_source)
-}
-
-async fn claim_sources_for_items<C>(
-    conn: &C,
-    project_id: i64,
-    items: &[WorkItemModel],
-) -> Result<BTreeMap<i64, WorkItemClaimSourceView>>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let run_to_item = items
-        .iter()
-        .filter_map(|item| {
-            let run_id = patchbay_run_id_from_agent(item.claimed_by.as_deref()?)?;
-            Some((run_id, item.id))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if run_to_item.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let run_ids = run_to_item.keys().copied().collect::<Vec<_>>();
-    let runs = AgentRun::find()
-        .filter(agent_run::Column::ProjectId.eq(project_id))
-        .filter(agent_run::Column::Id.is_in(run_ids))
-        .all(conn)
-        .await
-        .context("failed to list claimed item agent runs")?;
-
-    let mut claim_sources = BTreeMap::new();
-    for run in runs {
-        let Some(item_id) = run_to_item.get(&run.id).copied() else {
-            continue;
-        };
-        if run.work_item_id != Some(item_id) {
-            continue;
-        }
-        claim_sources.insert(item_id, claim_source_from_run(run));
-    }
-
-    Ok(claim_sources)
-}
-
-fn claim_source_from_run(run: AgentRunModel) -> WorkItemClaimSourceView {
-    WorkItemClaimSourceView {
-        run_id: run.id,
-        trigger_id: run.trigger_id,
-        trigger_name: projects::normalize_optional(run.trigger_name),
-    }
-}
-
-fn patchbay_run_id_from_agent(agent_id: &str) -> Option<i64> {
-    agent_id.strip_prefix("patchbay-run-")?.parse().ok()
-}
-
-fn work_item_view(
-    item: WorkItemModel,
-    labels: Vec<WorkItemLabelView>,
-    comment_count: i64,
-    claim_source: Option<WorkItemClaimSourceView>,
-) -> Result<WorkItemView> {
-    let state = item_labels::current_state(&labels);
-
-    Ok(WorkItemView {
-        id: item.id,
-        project_id: item.project_id,
-        title: item.title,
-        description: item.description,
-        state,
-        labels,
-        version: item.version,
-        claimed_by: item.claimed_by,
-        claimed_at: item.claimed_at,
-        claim_expires_at: item.claim_expires_at,
-        claim_source,
-        finished_at: item.finished_at,
-        agent_model_override: projects::normalize_optional(item.agent_model_override),
-        agent_reasoning_effort_override: item
-            .agent_reasoning_effort_override
-            .as_deref()
-            .map(str::parse::<AgentReasoningEffort>)
-            .transpose()?,
-        created_at: item.created_at,
-        updated_at: item.updated_at,
-        comment_count,
-    })
+    work_items::get(conn, project_id, item_id).await
 }
 
 fn validate_item_text(title: &str, description: &str) -> Result<()> {
@@ -1599,6 +1423,7 @@ mod tests {
     use super::*;
     use crate::backend::{
         comments::{AddComment, add_comment, list_comments},
+        entities::agent_run,
         projects::{CreateProject, create_project},
     };
 
@@ -2956,10 +2781,11 @@ mod tests {
             .unwrap()
             .unwrap();
         let project_id = projects::project_id(&store, "demo").await.unwrap();
-        let mut model: WorkItemActiveModel = get_item_model(&store, project_id, item.id)
-            .await
-            .unwrap()
-            .into();
+        let mut model: WorkItemActiveModel =
+            work_items::get(store.db().as_ref(), project_id, item.id)
+                .await
+                .unwrap()
+                .into();
         model.claimed_at = Set(Some(
             (OffsetDateTime::now_utc() - Duration::minutes(30))
                 .format(&Rfc3339)

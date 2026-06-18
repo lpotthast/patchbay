@@ -4,9 +4,9 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, TransactionTrait};
 use crate::{
     backend::{
         entities::work_item::WorkItemActiveModel,
-        events, items, projects,
+        events, projects,
         storage::{Store, utc_now},
-        work_item_comments, work_item_events,
+        work_item_comments, work_item_events, work_items,
     },
     shared::view_models::{AuthorType, CommentView},
 };
@@ -39,7 +39,7 @@ pub async fn add_comment(
         .begin()
         .await
         .context("failed to start comment add")?;
-    let item = items::get_item_model_in_tx(&txn, project_id, item_id).await?;
+    let item = work_items::get(&txn, project_id, item_id).await?;
     let now = utc_now();
 
     let comment =
@@ -74,7 +74,7 @@ pub async fn list_comments(
     item_id: i64,
 ) -> Result<Vec<CommentView>> {
     let project_id = projects::project_id(store, project_name).await?;
-    items::get_item_model(store, project_id, item_id).await?;
+    work_items::get(store.db().as_ref(), project_id, item_id).await?;
 
     work_item_comments::list_for_item(store.db().as_ref(), item_id)
         .await?
