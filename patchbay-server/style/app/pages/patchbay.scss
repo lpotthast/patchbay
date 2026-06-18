@@ -1634,7 +1634,6 @@ a.claim-badge {
 
 .project-settings form,
 .comments form,
-.actions form,
 .item-settings form {
   display: flex;
   gap: 9px;
@@ -1686,20 +1685,6 @@ a.claim-badge {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px 12px;
-  }
-}
-
-.actions {
-  @include surface;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
-  padding: 12px;
-
-  form {
-    align-items: center;
-    flex-wrap: wrap;
   }
 }
 

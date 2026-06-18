@@ -431,7 +431,14 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         find(driver, By::Css("section.item-settings")).await?;
         assert_source_does_not_contain(driver, "automation can claim this item").await?;
         assert_source_does_not_contain(driver, "Set state").await?;
-        assert_source_contains(driver, "Start agent").await?;
+        find(
+            driver,
+            By::XPath(
+                "//section[contains(@class, 'item-settings')]//button[contains(., 'Löschen')]",
+            ),
+        )
+        .await?;
+        assert_source_does_not_contain(driver, "Start agent").await?;
         assert_source_contains(driver, "Comments").await?;
         add_agent_comment(driver).await?;
         claim_current_item(driver).await?;

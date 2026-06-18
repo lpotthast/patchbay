@@ -1805,12 +1805,6 @@ fn item_content(page: ItemPage) -> AnyView {
         codex_status,
     );
     let board_href = format!("/?project={}", encode_path(&project));
-    let delete_action = format!(
-        "/projects/{}/items/{}/delete",
-        encode_path(&project),
-        item.id
-    );
-    let automation_action = format!("/projects/{}/automation/start", encode_path(&project));
     let comment_action = format!(
         "/projects/{}/items/{}/comments",
         encode_path(&project),
@@ -1828,6 +1822,10 @@ fn item_content(page: ItemPage) -> AnyView {
     });
     let exit_to_board_for_link = exit_to_board;
     let editor_default_create_state = Signal::derive(|| DEFAULT_STATE_LABEL.to_owned());
+    let item_detail_navigation = CrudNavigationConfig {
+        show_delete: true,
+        ..CrudNavigationConfig::embedded_single_entity()
+    };
     let item_editor = view! {
         <div class="crudkit-item-detail" data-crudkit-leptos="work-item-detail">
             <CrudInstance
@@ -1836,7 +1834,7 @@ fn item_content(page: ItemPage) -> AnyView {
                     api_base_url,
                     item_project_id,
                     SerializableCrudView::Edit(crudkit_i64_id(item_id)),
-                    CrudNavigationConfig::embedded_single_entity(),
+                    item_detail_navigation,
                     editor_default_create_state,
                     None,
                 )
@@ -1902,15 +1900,6 @@ fn item_content(page: ItemPage) -> AnyView {
                 <section class="item-settings panel">
                     <h2>"Item details"</h2>
                     {item_editor}
-                </section>
-                <section class="actions">
-                    <form method="post" action=delete_action>
-                        <button class="danger">"Delete"</button>
-                    </form>
-                    <form method="post" action=automation_action>
-                        <input type="hidden" name="item_id" value=item.id.to_string()/>
-                        <button>"Start agent"</button>
-                    </form>
                 </section>
                 {labels}
                 {automation_run_views}
