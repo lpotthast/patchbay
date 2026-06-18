@@ -11,6 +11,7 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     backend::{
         entities::{
+            comment::CommentModel,
             work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
             work_item_event,
             work_item_label::{self, WorkItemLabel, WorkItemLabelActiveModel, WorkItemLabelModel},
@@ -129,6 +130,31 @@ impl ClaimReturnMode<'_> {
             Self::Release { .. } => "failed to commit item release",
             Self::FeedbackRequest { .. } => "failed to commit feedback request",
         }
+    }
+}
+
+#[derive(Debug)]
+struct ActiveClaim {
+    item: WorkItemModel,
+}
+
+impl ActiveClaim {
+    fn touch_active_model(&self, updated_at: String) -> WorkItemActiveModel {
+        let mut active: WorkItemActiveModel = self.item.clone().into();
+        active.version = Set(self.item.version + 1);
+        active.updated_at = Set(updated_at);
+        active
+    }
+
+    fn clear_active_model(self, updated_at: String) -> WorkItemActiveModel {
+        let version = self.item.version;
+        let mut active: WorkItemActiveModel = self.item.into();
+        active.claimed_by = Set(None);
+        active.claimed_at = Set(None);
+        active.claim_expires_at = Set(None);
+        active.version = Set(version + 1);
+        active.updated_at = Set(updated_at);
+        active
     }
 }
 
@@ -660,21 +686,11 @@ pub async fn progress_item(
         .begin()
         .await
         .context("failed to start item progress")?;
-    let item = work_items::get(&txn, project_id, item_id).await?;
-    ensure_active_claim(&item, agent_id)?;
+    let claim = load_active_claim_in_tx(&txn, project_id, item_id, agent_id).await?;
 
-    let comment = work_item_comments::insert_in_tx(
-        &txn,
-        item_id,
-        AuthorType::Agent,
-        Some(agent_id.to_owned()),
-        body,
-    )
-    .await?;
+    let comment = record_agent_comment_in_tx(&txn, item_id, agent_id, body).await?;
 
-    let mut item_active: WorkItemActiveModel = item.clone().into();
-    item_active.version = Set(item.version + 1);
-    item_active.updated_at = Set(utc_now());
+    let item_active = claim.touch_active_model(utc_now());
     item_active
         .update(&txn)
         .await
@@ -707,27 +723,13 @@ pub async fn finish_item(
         .begin()
         .await
         .context("failed to start item finish")?;
-    let existing = work_items::get(&txn, project_id, item_id).await?;
-    ensure_active_claim(&existing, agent_id)?;
+    let claim = load_active_claim_in_tx(&txn, project_id, item_id, agent_id).await?;
 
     let now = utc_now();
-    work_item_comments::insert_in_tx(
-        &txn,
-        item_id,
-        AuthorType::Agent,
-        Some(agent_id.to_owned()),
-        report,
-    )
-    .await?;
+    record_agent_comment_in_tx(&txn, item_id, agent_id, report).await?;
 
-    let version = existing.version;
-    let mut active: WorkItemActiveModel = existing.into();
-    active.claimed_by = Set(None);
-    active.claimed_at = Set(None);
-    active.claim_expires_at = Set(None);
+    let mut active = claim.clear_active_model(now.clone());
     active.finished_at = Set(Some(now.clone()));
-    active.version = Set(version + 1);
-    active.updated_at = Set(now);
     let updated = active
         .update(&txn)
         .await
@@ -740,12 +742,17 @@ pub async fn finish_item(
         Some(FINISHED_STATE_LABEL),
     )
     .await?;
-    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, CLAIMED_FROM_STATE_LABEL_KEY)
-        .await?;
-    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, AUTOMATION_BLOCKED_LABEL_KEY)
-        .await?;
-    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, FEEDBACK_REQUESTED_LABEL_KEY)
-        .await?;
+    delete_workflow_labels_in_tx(
+        &txn,
+        project_id,
+        item_id,
+        &[
+            CLAIMED_FROM_STATE_LABEL_KEY,
+            AUTOMATION_BLOCKED_LABEL_KEY,
+            FEEDBACK_REQUESTED_LABEL_KEY,
+        ],
+    )
+    .await?;
     work_item_events::record_event_in_tx(&txn, project_id, Some(item_id), "item_finished", report)
         .await?;
     txn.commit().await.context("failed to commit item finish")?;
@@ -1090,19 +1097,11 @@ async fn return_claim_to_source_state(
 ) -> Result<WorkItemView> {
     let project_id = projects::project_id(store, project_name).await?;
     let txn = store.db().begin().await.context(mode.start_context())?;
-    let existing = work_items::get(&txn, project_id, item_id).await?;
-    ensure_active_claim(&existing, agent_id)?;
+    let claim = load_active_claim_in_tx(&txn, project_id, item_id, agent_id).await?;
     let labels = work_item_labels::for_item(&txn, project_id, item_id).await?;
     let release_state = item_labels::release_state_from_claim_labels(&labels);
 
-    let now = utc_now();
-    let version = existing.version;
-    let mut active: WorkItemActiveModel = existing.into();
-    active.claimed_by = Set(None);
-    active.claimed_at = Set(None);
-    active.claim_expires_at = Set(None);
-    active.version = Set(version + 1);
-    active.updated_at = Set(now);
+    let active = claim.clear_active_model(utc_now());
     let updated = active.update(&txn).await.context(mode.update_context())?;
 
     work_item_labels::upsert_in_tx(
@@ -1113,7 +1112,7 @@ async fn return_claim_to_source_state(
         Some(release_state.as_str()),
     )
     .await?;
-    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, CLAIMED_FROM_STATE_LABEL_KEY)
+    delete_workflow_labels_in_tx(&txn, project_id, item_id, &[CLAIMED_FROM_STATE_LABEL_KEY])
         .await?;
     if mode.blocks_automation() {
         work_item_labels::upsert_in_tx(
@@ -1140,14 +1139,7 @@ async fn return_claim_to_source_state(
         .agent_comment_body()
         .filter(|body| !body.trim().is_empty())
     {
-        work_item_comments::insert_in_tx(
-            &txn,
-            item_id,
-            AuthorType::Agent,
-            Some(agent_id.to_owned()),
-            comment,
-        )
-        .await?;
+        record_agent_comment_in_tx(&txn, item_id, agent_id, comment).await?;
     }
 
     let event_body = mode.event_body(agent_id, &release_state);
@@ -1163,6 +1155,54 @@ async fn return_claim_to_source_state(
     events::publish_work_item_changed(project_name, item_id);
 
     work_items::model_to_view(store, updated).await
+}
+
+async fn load_active_claim_in_tx<C>(
+    conn: &C,
+    project_id: i64,
+    item_id: i64,
+    agent_id: &str,
+) -> Result<ActiveClaim>
+where
+    C: ConnectionTrait,
+{
+    let item = work_items::get(conn, project_id, item_id).await?;
+    ensure_active_claim(&item, agent_id)?;
+    Ok(ActiveClaim { item })
+}
+
+async fn record_agent_comment_in_tx<C>(
+    conn: &C,
+    item_id: i64,
+    agent_id: &str,
+    body: &str,
+) -> Result<CommentModel>
+where
+    C: ConnectionTrait,
+{
+    work_item_comments::insert_in_tx(
+        conn,
+        item_id,
+        AuthorType::Agent,
+        Some(agent_id.to_owned()),
+        body,
+    )
+    .await
+}
+
+async fn delete_workflow_labels_in_tx<C>(
+    conn: &C,
+    project_id: i64,
+    item_id: i64,
+    label_keys: &[&str],
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    for label_key in label_keys {
+        work_item_labels::delete_by_key_in_tx(conn, project_id, item_id, label_key).await?;
+    }
+    Ok(())
 }
 
 async fn unclaimed_items_in_claim_order<C>(conn: &C, project_id: i64) -> Result<Vec<WorkItemModel>>
@@ -2679,6 +2719,66 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("claimed by agent-a"));
+    }
+
+    #[tokio::test]
+    async fn finish_clears_claim_and_blocking_workflow_labels() {
+        let (_temp, store) = test_store().await;
+        let item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Finish blocked item".to_owned(),
+                description: "Completion should clear workflow bookkeeping labels".to_owned(),
+                state: "ready".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        add_label(
+            &store,
+            "demo",
+            item.id,
+            AUTOMATION_BLOCKED_LABEL_KEY.to_owned(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        claim_specific_item(&store, "demo", item.id, "agent-a")
+            .await
+            .unwrap()
+            .unwrap();
+        add_label(
+            &store,
+            "demo",
+            item.id,
+            FEEDBACK_REQUESTED_LABEL_KEY.to_owned(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let finished = finish_item(&store, "demo", item.id, "agent-a", "Finished cleanly")
+            .await
+            .unwrap();
+
+        assert_eq!(finished.state.as_deref(), Some(FINISHED_STATE_LABEL));
+        assert_eq!(finished.claimed_by, None);
+        assert!(finished.finished_at.is_some());
+        for key in [
+            CLAIMED_FROM_STATE_LABEL_KEY,
+            AUTOMATION_BLOCKED_LABEL_KEY,
+            FEEDBACK_REQUESTED_LABEL_KEY,
+        ] {
+            assert!(
+                finished.labels.iter().all(|label| label.key != key),
+                "finished item should not retain {key}"
+            );
+        }
     }
 
     #[tokio::test]
