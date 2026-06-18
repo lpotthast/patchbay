@@ -803,7 +803,7 @@ async fn complete_started_automation_run(
                         ClaimReleaseReason::Failed
                     },
                     detail: Some(&result_summary),
-                    automation_disposition: items::ReleaseAutomationDisposition::Blocked,
+                    automation_disposition: successful_claim_release_disposition(start.mode),
                 },
             )
             .await?;
@@ -1525,6 +1525,17 @@ async fn release_claim_if_needed(store: &Store, context: ClaimReleaseContext<'_>
     )
     .await?;
     Ok(())
+}
+
+fn successful_claim_release_disposition(
+    mode: AutomationMode,
+) -> items::ReleaseAutomationDisposition {
+    match mode {
+        AutomationMode::Execute => items::ReleaseAutomationDisposition::Blocked,
+        AutomationMode::Refine | AutomationMode::Review => {
+            items::ReleaseAutomationDisposition::Claimable
+        }
+    }
 }
 
 fn claim_release_comment(base: &str, run_id: i64, detail: Option<&str>) -> String {
@@ -2414,6 +2425,11 @@ fn build_prompt(context: PromptContext<'_>) -> String {
             item.description
         ));
     }
+    if let Some(mode_instructions) = mode_specific_workflow_instructions(context.mode) {
+        prompt.push_str("## Mode-Specific Workflow\n\n");
+        prompt.push_str(mode_instructions);
+        prompt.push_str("\n\n");
+    }
     prompt.push_str("## Git Commit And Revert Policy\n\n");
     prompt.push_str(&format!("Workspace mode: {}\n", context.workspace_mode));
     match context.workspace_mode {
@@ -2430,19 +2446,37 @@ fn build_prompt(context: PromptContext<'_>) -> String {
                 "- At the start of work, inspect `git status --short` so you can distinguish pre-existing changes from your own changes.\n",
             );
             if context.auto_commit {
-                prompt.push_str(
-                    "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
-                );
+                if context.mode == AutomationMode::Refine {
+                    prompt.push_str(
+                        "- After completed refinement or verification, inspect the diff. If you changed repository files, stage only those changes and create a git commit before ending the run; if there are no file changes, no commit is needed.\n",
+                    );
+                } else {
+                    prompt.push_str(
+                        "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
+                    );
+                }
                 prompt.push_str(
                     "- Generate the commit message from the completed diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
                 );
-                prompt.push_str(
-                    "- If the project is not a git repository or there are no file changes to commit, say that in the finish report instead of inventing a commit.\n",
-                );
+                if context.mode == AutomationMode::Refine {
+                    prompt.push_str(
+                        "- If the project is not a git repository or there are no file changes to commit, say that in your final response instead of inventing a commit.\n",
+                    );
+                } else {
+                    prompt.push_str(
+                        "- If the project is not a git repository or there are no file changes to commit, say that in the finish report instead of inventing a commit.\n",
+                    );
+                }
             } else {
-                prompt.push_str(
-                    "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report.\n",
-                );
+                if context.mode == AutomationMode::Refine {
+                    prompt.push_str(
+                        "- Do not create a git commit solely for Patchbay after completed refinement; leave completed file changes in the current branch and describe them in your final response.\n",
+                    );
+                } else {
+                    prompt.push_str(
+                        "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report.\n",
+                    );
+                }
             }
             prompt.push_str(&format!(
                 "- If the work cannot be completed, revert all changes you made using the `{}` strategy before calling `patchbay item release --comment ...`.\n",
@@ -2454,9 +2488,15 @@ fn build_prompt(context: PromptContext<'_>) -> String {
             prompt.push_str(
                 "Auto-commit: always on for this workspace mode\nFailure revert strategy: not applicable\n\n",
             );
-            prompt.push_str(
-                "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
-            );
+            if context.mode == AutomationMode::Refine {
+                prompt.push_str(
+                    "- After completed refinement or verification, inspect the diff. If you changed repository files, stage the changes for this work item and create a git commit before ending the run; if there are no file changes, no commit is needed.\n",
+                );
+            } else {
+                prompt.push_str(
+                    "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish`.\n",
+                );
+            }
             prompt.push_str(
                 "- If the work cannot be completed, do not revert partial changes solely because the work is incomplete. Commit the useful partial work and then call `patchbay item release --comment ...` with what you tried and what remains.\n",
             );
@@ -2499,6 +2539,21 @@ fn build_prompt(context: PromptContext<'_>) -> String {
         );
     }
     prompt
+}
+
+fn mode_specific_workflow_instructions(mode: AutomationMode) -> Option<&'static str> {
+    match mode {
+        AutomationMode::Execute | AutomationMode::Review => None,
+        AutomationMode::Refine => Some(
+            "This refinement run is expected to improve Patchbay work-item metadata rather than complete the underlying implementation work. These instructions override generic finish/release guidance for successful refinement runs.\n\n\
+            - Do not call `patchbay item finish` after a successful refinement or verification pass.\n\
+            - Do not call `patchbay item release` after a successful refinement or verification pass; Patchbay will release the temporary claim when your process exits.\n\
+            - Use `patchbay item update`, label commands, and progress comments to record the result.\n\
+            - Remove the trigger label when the pass is complete so this automation does not immediately claim the item again.\n\
+            - If the pass is blocked or cannot be completed, leave the trigger label in place and call `patchbay item release --comment ...` with the blocker.\n\
+            - Do not edit repository files unless the trigger prompt explicitly requires it. If there are no file changes, no git commit is needed.",
+        ),
+    }
 }
 
 fn git_command_policy_prompt(
@@ -3638,6 +3693,45 @@ mod tests {
         assert!(prompt.contains("`git reset --hard` is allowed because this run uses an isolated"));
         assert!(
             prompt.contains("not configured; infer the repository's existing commit message style")
+        );
+    }
+
+    #[test]
+    fn refine_prompt_overrides_successful_finish_and_release_guidance() {
+        let prompt = build_prompt(PromptContext {
+            project_name: "demo",
+            mode: AutomationMode::Refine,
+            system_prompt: "",
+            memory: "",
+            memory_event_id: None,
+            item: None,
+            agent_id: "patchbay-run-1",
+            extra_prompt: Some("Refine labeled work."),
+            workspace_mode: WorkspaceMode::CurrentBranch,
+            auto_commit: true,
+            commit_standard: "",
+            revert_strategy: RevertStrategy::Manual,
+            create_pr: false,
+            agent_git_command_policy: &Default::default(),
+        });
+
+        assert!(prompt.contains("## Mode-Specific Workflow"));
+        assert!(prompt.contains("Do not call `patchbay item finish` after a successful"));
+        assert!(prompt.contains("Patchbay will release the temporary claim"));
+        assert!(prompt.contains("Remove the trigger label"));
+        assert!(prompt.contains("no git commit is needed"));
+        assert!(!prompt.contains("create a git commit before calling `patchbay item finish`"));
+    }
+
+    #[test]
+    fn successful_refine_runs_release_claims_without_blocking_automation() {
+        assert_eq!(
+            successful_claim_release_disposition(AutomationMode::Execute),
+            items::ReleaseAutomationDisposition::Blocked
+        );
+        assert_eq!(
+            successful_claim_release_disposition(AutomationMode::Refine),
+            items::ReleaseAutomationDisposition::Claimable
         );
     }
 

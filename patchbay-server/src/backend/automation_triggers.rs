@@ -28,16 +28,58 @@ use crate::{
     shared::view_models::{
         AgentToolName, AutomationActivation, AutomationEffect, AutomationMode,
         AutomationTriggerView, TriggerRunOutcome, default_automation_work_item_selector,
+        needs_refinement_automation_work_item_selector,
+        needs_verification_automation_work_item_selector,
     },
 };
 
 const DEFAULT_WORK_ITEM_AUTOMATION_NAME: &str = "Claim open work";
+const DEFAULT_REFINEMENT_AUTOMATION_NAME: &str = "Refine needs-refinement work";
+const DEFAULT_VERIFICATION_AUTOMATION_NAME: &str = "Verify needs-verification work";
 const DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE: &str = "@every 15s";
 const SCHEDULER_TICK_SECONDS: u64 = 1;
 const MAINTENANCE_TICK_SECONDS: u64 = 15;
 const PRIORITY_SCORE_SECONDS: i64 = 300;
 const EVALUATION_COUNT_SCORE_SECONDS: i64 = 300;
 const NEVER_RUN_SCORE_SECONDS: i64 = 24 * 60 * 60;
+const REFINEMENT_AUTOMATION_PRIORITY: i64 = 20;
+const VERIFICATION_AUTOMATION_PRIORITY: i64 = 10;
+
+const DEFAULT_REFINEMENT_AUTOMATION_PROMPT: &str = r#"You are the needs-refinement executor for the claimed Patchbay work item.
+
+Goal: turn a rough or under-specified item into implementation-ready work. Do not implement the work.
+
+Required workflow:
+- Re-read the item, comments, labels, and any relevant project memory before editing it.
+- Clarify the title and description so a later implementation agent can act without guessing. Prefer concrete scope, non-goals, acceptance criteria, suggested approach, verification expectations, and open questions only when human input is genuinely required.
+- Update labels when they improve routing, priority, status, environment, or follow-up handling.
+- Remove the `needs-refinement` label when refinement is complete. Keep or add `needs-verification` only when the refined item should be checked before implementation.
+- Add a concise progress comment summarizing what changed.
+
+Do not call `patchbay item finish` for successful refinement, and do not call `patchbay item release` after successful refinement. Let Patchbay release the temporary claim after your final response. If the item cannot be refined without a human decision, leave `needs-refinement` in place and call `patchbay item release --comment ...` with the blocker."#;
+
+const DEFAULT_VERIFICATION_AUTOMATION_PROMPT: &str = r#"You are the needs-verification executor for the claimed Patchbay work item.
+
+Goal: verify whether the item is necessary, accurate, and ready for a later implementation agent. Do not implement the work.
+
+Required workflow:
+- Re-read the item, comments, labels, and any relevant project memory. Inspect repository files only as needed to verify facts.
+- Update the title or description with verification findings, corrected scope, risks, acceptance criteria, and verification notes that future workers need.
+- Update labels when they improve routing, priority, status, environment, or follow-up handling.
+- Remove the `needs-verification` label when verification is complete. Add `needs-refinement` only if the item still needs story-shaping before implementation.
+- Add a concise progress comment with the verification result.
+
+If verification shows the work is unnecessary, explain why in the item and a comment. You may move the item to a project-specific terminal state only when that state already exists in the project's visible workflow vocabulary; do not invent or hardcode a state name. Use `patchbay label suggestions --json`, existing item labels, comments, or project docs to infer that vocabulary.
+
+Do not call `patchbay item finish` for successful verification, and do not call `patchbay item release` after successful verification. Let Patchbay release the temporary claim after your final response. If verification is blocked, leave `needs-verification` in place and call `patchbay item release --comment ...` with the blocker."#;
+
+struct DefaultProjectAutomation {
+    name: &'static str,
+    mode: AutomationMode,
+    prompt: &'static str,
+    selector: fn() -> Condition,
+    priority: i64,
+}
 
 #[derive(Clone, Debug)]
 pub struct CreateAutomationTrigger {
@@ -953,9 +995,43 @@ pub(crate) fn default_work_item_selector() -> Condition {
     default_automation_work_item_selector()
 }
 
+pub(crate) fn default_refinement_work_item_selector() -> Condition {
+    needs_refinement_automation_work_item_selector()
+}
+
+pub(crate) fn default_verification_work_item_selector() -> Condition {
+    needs_verification_automation_work_item_selector()
+}
+
 pub(crate) fn default_work_item_selector_storage() -> Result<String> {
     selector_to_storage(Some(&default_work_item_selector()))?
         .ok_or_else(|| report!("default work-item automation selector cannot be empty"))
+}
+
+fn default_project_automations() -> [DefaultProjectAutomation; 3] {
+    [
+        DefaultProjectAutomation {
+            name: DEFAULT_WORK_ITEM_AUTOMATION_NAME,
+            mode: AutomationMode::Execute,
+            prompt: "",
+            selector: default_work_item_selector,
+            priority: 0,
+        },
+        DefaultProjectAutomation {
+            name: DEFAULT_REFINEMENT_AUTOMATION_NAME,
+            mode: AutomationMode::Refine,
+            prompt: DEFAULT_REFINEMENT_AUTOMATION_PROMPT,
+            selector: default_refinement_work_item_selector,
+            priority: REFINEMENT_AUTOMATION_PRIORITY,
+        },
+        DefaultProjectAutomation {
+            name: DEFAULT_VERIFICATION_AUTOMATION_NAME,
+            mode: AutomationMode::Refine,
+            prompt: DEFAULT_VERIFICATION_AUTOMATION_PROMPT,
+            selector: default_verification_work_item_selector,
+            priority: VERIFICATION_AUTOMATION_PRIORITY,
+        },
+    ]
 }
 
 pub(crate) async fn ensure_default_project_automations_in_conn<C>(
@@ -966,11 +1042,24 @@ pub(crate) async fn ensure_default_project_automations_in_conn<C>(
 where
     C: ConnectionTrait,
 {
+    for default in default_project_automations() {
+        ensure_default_project_automation_in_conn(conn, project_id, default_tool, default).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_default_project_automation_in_conn<C>(
+    conn: &C,
+    project_id: i64,
+    default_tool: &str,
+    default: DefaultProjectAutomation,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
     let existing = AutomationTrigger::find()
         .filter(automation_trigger::Column::ProjectId.eq(project_id))
-        .filter(
-            automation_trigger::Column::Activation.eq(AutomationActivation::WorkItem.as_storage()),
-        )
+        .filter(automation_trigger::Column::Name.eq(default.name))
         .limit(1)
         .one(conn)
         .await
@@ -979,19 +1068,20 @@ where
         return Ok(());
     }
 
+    let selector = (default.selector)();
     let now = utc_now();
     AutomationTriggerActiveModel {
         project_id: Set(project_id),
-        name: Set(DEFAULT_WORK_ITEM_AUTOMATION_NAME.to_owned()),
+        name: Set(default.name.to_owned()),
         enabled: Set(true),
         activation: Set(AutomationActivation::WorkItem.as_storage().to_owned()),
         effect: Set(AutomationEffect::ConsumeWork.as_storage().to_owned()),
         schedule: Set(DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned()),
-        mode: Set(AutomationMode::Execute.as_storage().to_owned()),
+        mode: Set(default.mode.as_storage().to_owned()),
         tool_name: Set(default_tool.to_owned()),
-        prompt: Set(String::new()),
-        work_item_selector: Set(Some(default_work_item_selector_storage()?)),
-        priority: Set(0),
+        prompt: Set(default.prompt.to_owned()),
+        work_item_selector: Set(selector_to_storage(Some(&selector))?),
+        priority: Set(default.priority),
         evaluation_count: Set(0),
         pending_evaluation_count: Set(0),
         last_evaluation_queued_at: Set(None),
@@ -1135,7 +1225,7 @@ mod tests {
     use super::*;
     use crate::backend::{
         agent_tools::set_tool_path,
-        items::{CreateWorkItem, create_item, get_item},
+        items::{CreateWorkItem, add_label, create_item, get_item, item_matches_condition},
         projects::{CreateProject, create_project},
     };
 
@@ -1175,10 +1265,8 @@ mod tests {
     async fn new_project_gets_default_work_item_automation() {
         let (_temp, store) = test_store().await;
         let automations = list_triggers(&store, "demo").await.unwrap();
-        let automation = automations
-            .iter()
-            .find(|automation| automation.name == DEFAULT_WORK_ITEM_AUTOMATION_NAME)
-            .unwrap();
+        assert_eq!(automations.len(), 3);
+        let automation = automation_by_name(&automations, DEFAULT_WORK_ITEM_AUTOMATION_NAME);
 
         assert_eq!(automation.activation, AutomationActivation::WorkItem);
         assert_eq!(automation.effect, AutomationEffect::ConsumeWork);
@@ -1191,6 +1279,152 @@ mod tests {
         assert_eq!(automation.priority, 0);
         assert_eq!(automation.evaluation_count, 0);
         assert_eq!(automation.pending_evaluation_count, 0);
+
+        let refiner = automation_by_name(&automations, DEFAULT_REFINEMENT_AUTOMATION_NAME);
+        assert_eq!(refiner.activation, AutomationActivation::WorkItem);
+        assert_eq!(refiner.effect, AutomationEffect::ConsumeWork);
+        assert_eq!(refiner.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
+        assert_eq!(refiner.mode, AutomationMode::Refine);
+        assert_eq!(
+            refiner.work_item_selector,
+            Some(default_refinement_work_item_selector())
+        );
+        assert_eq!(refiner.priority, REFINEMENT_AUTOMATION_PRIORITY);
+        assert!(refiner.prompt.contains("Do not implement the work"));
+        assert!(
+            refiner
+                .prompt
+                .contains("Remove the `needs-refinement` label")
+        );
+        assert!(
+            refiner
+                .prompt
+                .contains("Do not call `patchbay item finish`")
+        );
+
+        let verifier = automation_by_name(&automations, DEFAULT_VERIFICATION_AUTOMATION_NAME);
+        assert_eq!(verifier.activation, AutomationActivation::WorkItem);
+        assert_eq!(verifier.effect, AutomationEffect::ConsumeWork);
+        assert_eq!(verifier.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
+        assert_eq!(verifier.mode, AutomationMode::Refine);
+        assert_eq!(
+            verifier.work_item_selector,
+            Some(default_verification_work_item_selector())
+        );
+        assert_eq!(verifier.priority, VERIFICATION_AUTOMATION_PRIORITY);
+        assert!(verifier.prompt.contains("Do not implement the work"));
+        assert!(
+            verifier
+                .prompt
+                .contains("Remove the `needs-verification` label")
+        );
+        assert!(
+            verifier
+                .prompt
+                .contains("do not invent or hardcode a state name")
+        );
+    }
+
+    fn automation_by_name<'a>(
+        automations: &'a [AutomationTriggerView],
+        name: &str,
+    ) -> &'a AutomationTriggerView {
+        automations
+            .iter()
+            .find(|automation| automation.name == name)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn default_selectors_route_labeled_items_to_refinement_automations() {
+        let (_temp, store) = test_store().await;
+        let refine_item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Needs shape".to_owned(),
+                description: "Rough story".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        add_label(
+            &store,
+            "demo",
+            refine_item.id,
+            "needs-refinement".to_owned(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let verify_item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Needs check".to_owned(),
+                description: "Verify this before implementation".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+            },
+        )
+        .await
+        .unwrap();
+        add_label(
+            &store,
+            "demo",
+            verify_item.id,
+            "needs-verification".to_owned(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !item_matches_condition(
+                &store,
+                "demo",
+                refine_item.id,
+                &default_work_item_selector()
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            item_matches_condition(
+                &store,
+                "demo",
+                refine_item.id,
+                &default_refinement_work_item_selector()
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !item_matches_condition(
+                &store,
+                "demo",
+                verify_item.id,
+                &default_work_item_selector()
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            item_matches_condition(
+                &store,
+                "demo",
+                verify_item.id,
+                &default_verification_work_item_selector()
+            )
+            .await
+            .unwrap()
+        );
     }
 
     #[test]

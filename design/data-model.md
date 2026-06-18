@@ -44,7 +44,7 @@ Patchbay also uses hardcoded workflow labels. `patchbay:claimed-from-state=<stat
 
 Work item states are project-scoped records with an identifier, display name, and position. They define the authored values that operators should use for the `state` label. New projects start with `idea`, `open`, `in_progress`, and `done` states.
 
-Swim-lanes are project-scoped records with an identifier, display name, position, item order, item creation flag, and a CrudKit `Condition`-shaped filter stored as JSON. Lane filters use work item label keys as `column_name` values, so a lane can show `state=open`, `severity=high`, or nested label combinations. New projects start with lanes that mirror the default states by filtering on `state=<state-identifier>`, but users can add, rename, reorder, remove, or redefine lanes independently from authored states. New projects also get an editable work-consuming automation that checks for the first unclaimed item matching `state=open`.
+Swim-lanes are project-scoped records with an identifier, display name, position, item order, item creation flag, and a CrudKit `Condition`-shaped filter stored as JSON. Lane filters use work item label keys as `column_name` values, so a lane can show `state=open`, `severity=high`, or nested label combinations. New projects start with lanes that mirror the default states by filtering on `state=<state-identifier>`, but users can add, rename, reorder, remove, or redefine lanes independently from authored states. New projects also get editable work-consuming automations for ordinary open work, needs-refinement routing, and needs-verification routing. The ordinary open-work default targets `state=open` while excluding the refinement and verification routing labels.
 
 The version field supports optimistic safety for updates and workflow transitions. Claim ownership is enforced server-side.
 
@@ -112,6 +112,14 @@ Supported effects are:
 - `consume_work`: schedules an agent run for a matching work item.
 
 Automation records include enabled state, mode, tool, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
+
+Default project automation rules are ordinary editable records. Patchbay creates and migrates these defaults:
+
+- `Claim open work`: consume-work, execute mode, selector `state=open` plus absence of `needs-refinement` and `needs-verification`.
+- `Refine needs-refinement work`: consume-work, refine mode, selector requiring the `needs-refinement` label.
+- `Verify needs-verification work`: consume-work, refine mode, selector requiring the `needs-verification` label.
+
+The refiner and verifier prompts instruct agents to update item title, description, comments, and labels, remove the triggering label when complete, and leave the underlying implementation work unfinished for later automation or humans.
 
 ## Settings
 

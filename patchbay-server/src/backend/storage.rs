@@ -154,6 +154,7 @@ mod tests {
             "m20260617_000027_add_project_agent_git_command_policy",
             "m20260617_000028_add_automation_run_commit_outcomes",
             "m20260617_000029_add_automation_run_token_usage",
+            "m20260618_000030_add_refiner_verifier_automations",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());

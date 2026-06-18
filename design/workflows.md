@@ -84,6 +84,15 @@ For the claimed item, omit project, agent, and item id arguments unless intentio
 
 Patchbay supports automation modes for code-editing and refinement work. Automation rules either produce work items or consume work items. Work-consuming automation uses execute or refinement modes so every agent launched by a rule has an item to claim, comment on, finish, or release.
 
+Refinement-mode work-consuming automations are allowed to complete without finishing the claimed item. Successful refinement runs are for improving the work item itself: title, description, labels, comments, and routing. When a refinement-mode agent exits successfully while the item is still claimed, Patchbay releases the temporary claim back to the claimed-from state without adding `patchbay:automation-blocked`. Failed refinement runs still release with automation blocked so a broken prompt, missing context, or sandbox failure does not loop indefinitely.
+
+Patchbay ships editable default refinement-mode consumers for label-routed story preparation:
+
+- a refiner for items labeled `needs-refinement`;
+- a verifier for items labeled `needs-verification`.
+
+Their prompts tell agents not to implement the work and not to call `patchbay item finish` for successful refinement or verification. The verifier may move an unnecessary item to a terminal workflow state only when that state is already evident from the project's user-defined workflow vocabulary; Patchbay does not hardcode a universal state value for that instruction.
+
 Review-style work that should not run automatically is modeled as work-producing automation: a manual evaluation creates a review item with the expensive prompt, and a work-consuming automation can later run an agent against that item.
 
 Mode-specific launch details are server policy. Agents should rely on the prepared prompt and environment, not infer policy from local files.

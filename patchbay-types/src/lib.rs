@@ -700,12 +700,42 @@ pub const CLAIMED_STATE_LABEL: &str = "in_progress";
 pub const FINISHED_STATE_LABEL: &str = "done";
 pub const CLAIMED_FROM_STATE_LABEL_KEY: &str = "patchbay:claimed-from-state";
 pub const AUTOMATION_BLOCKED_LABEL_KEY: &str = "patchbay:automation-blocked";
+pub const NEEDS_REFINEMENT_LABEL_KEY: &str = "needs-refinement";
+pub const NEEDS_VERIFICATION_LABEL_KEY: &str = "needs-verification";
 
 pub fn default_automation_work_item_selector() -> Condition {
+    Condition::All(vec![
+        ConditionElement::Clause(ConditionClause {
+            column_name: STATE_LABEL_KEY.to_owned(),
+            operator: Operator::Equal,
+            value: ConditionClauseValue::String(DEFAULT_STATE_LABEL.to_owned()),
+        }),
+        ConditionElement::Clause(ConditionClause {
+            column_name: NEEDS_REFINEMENT_LABEL_KEY.to_owned(),
+            operator: Operator::Equal,
+            value: ConditionClauseValue::Bool(false),
+        }),
+        ConditionElement::Clause(ConditionClause {
+            column_name: NEEDS_VERIFICATION_LABEL_KEY.to_owned(),
+            operator: Operator::Equal,
+            value: ConditionClauseValue::Bool(false),
+        }),
+    ])
+}
+
+pub fn needs_refinement_automation_work_item_selector() -> Condition {
+    label_presence_selector(NEEDS_REFINEMENT_LABEL_KEY)
+}
+
+pub fn needs_verification_automation_work_item_selector() -> Condition {
+    label_presence_selector(NEEDS_VERIFICATION_LABEL_KEY)
+}
+
+fn label_presence_selector(label_key: &str) -> Condition {
     Condition::All(vec![ConditionElement::Clause(ConditionClause {
-        column_name: STATE_LABEL_KEY.to_owned(),
+        column_name: label_key.to_owned(),
         operator: Operator::Equal,
-        value: ConditionClauseValue::String(DEFAULT_STATE_LABEL.to_owned()),
+        value: ConditionClauseValue::Bool(true),
     })])
 }
 

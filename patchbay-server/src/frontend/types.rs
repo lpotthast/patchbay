@@ -48,7 +48,7 @@ pub mod automation_trigger {
                 tool_name: "codex".to_owned(),
                 prompt: String::new(),
                 work_item_selector: Some(
-                    r#"{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}}]}"#
+                    r#"{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}},{"column_name":"needs-refinement","operator":"=","value":{"Bool":false}},{"column_name":"needs-verification","operator":"=","value":{"Bool":false}}]}"#
                         .to_owned(),
                 ),
                 priority: 0,

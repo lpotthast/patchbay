@@ -208,6 +208,39 @@ pub struct Migrator;
 
 const DEFAULT_AGENT_GIT_COMMAND_POLICY: &str =
     r#"{"add":true,"commit":true,"push":true,"reset":true,"hard_reset":"isolated_workspaces"}"#;
+const OLD_DEFAULT_WORK_ITEM_SELECTOR: &str =
+    r#"{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}}]}"#;
+const DEFAULT_WORK_ITEM_SELECTOR: &str = r#"{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}},{"column_name":"needs-refinement","operator":"=","value":{"Bool":false}},{"column_name":"needs-verification","operator":"=","value":{"Bool":false}}]}"#;
+const DEFAULT_REFINEMENT_SELECTOR: &str =
+    r#"{"All":[{"column_name":"needs-refinement","operator":"=","value":{"Bool":true}}]}"#;
+const DEFAULT_VERIFICATION_SELECTOR: &str =
+    r#"{"All":[{"column_name":"needs-verification","operator":"=","value":{"Bool":true}}]}"#;
+const DEFAULT_REFINEMENT_PROMPT: &str = r#"You are the needs-refinement executor for the claimed Patchbay work item.
+
+Goal: turn a rough or under-specified item into implementation-ready work. Do not implement the work.
+
+Required workflow:
+- Re-read the item, comments, labels, and any relevant project memory before editing it.
+- Clarify the title and description so a later implementation agent can act without guessing. Prefer concrete scope, non-goals, acceptance criteria, suggested approach, verification expectations, and open questions only when human input is genuinely required.
+- Update labels when they improve routing, priority, status, environment, or follow-up handling.
+- Remove the `needs-refinement` label when refinement is complete. Keep or add `needs-verification` only when the refined item should be checked before implementation.
+- Add a concise progress comment summarizing what changed.
+
+Do not call `patchbay item finish` for successful refinement, and do not call `patchbay item release` after successful refinement. Let Patchbay release the temporary claim after your final response. If the item cannot be refined without a human decision, leave `needs-refinement` in place and call `patchbay item release --comment ...` with the blocker."#;
+const DEFAULT_VERIFICATION_PROMPT: &str = r#"You are the needs-verification executor for the claimed Patchbay work item.
+
+Goal: verify whether the item is necessary, accurate, and ready for a later implementation agent. Do not implement the work.
+
+Required workflow:
+- Re-read the item, comments, labels, and any relevant project memory. Inspect repository files only as needed to verify facts.
+- Update the title or description with verification findings, corrected scope, risks, acceptance criteria, and verification notes that future workers need.
+- Update labels when they improve routing, priority, status, environment, or follow-up handling.
+- Remove the `needs-verification` label when verification is complete. Add `needs-refinement` only if the item still needs story-shaping before implementation.
+- Add a concise progress comment with the verification result.
+
+If verification shows the work is unnecessary, explain why in the item and a comment. You may move the item to a project-specific terminal state only when that state already exists in the project's visible workflow vocabulary; do not invent or hardcode a state name. Use `patchbay label suggestions --json`, existing item labels, comments, or project docs to infer that vocabulary.
+
+Do not call `patchbay item finish` for successful verification, and do not call `patchbay item release` after successful verification. Let Patchbay release the temporary claim after your final response. If verification is blocked, leave `needs-verification` in place and call `patchbay item release --comment ...` with the blocker."#;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
@@ -243,6 +276,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddProjectAgentGitCommandPolicy),
             Box::new(AddAutomationRunCommitOutcomes),
             Box::new(AddAutomationRunTokenUsage),
+            Box::new(AddRefinerVerifierAutomations),
         ]
     }
 }
@@ -2224,6 +2258,192 @@ impl MigrationTrait for AddAutomationRunTokenUsage {
         drop_column_if_present(manager, "agent_runs", "input_tokens").await?;
         create_read_view(manager, "agent_runs", "agent_runs_read_view").await
     }
+}
+
+struct AddRefinerVerifierAutomations;
+
+impl MigrationName for AddRefinerVerifierAutomations {
+    fn name(&self) -> &str {
+        "m20260618_000030_add_refiner_verifier_automations"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddRefinerVerifierAutomations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        update_default_open_work_selector(manager, DEFAULT_WORK_ITEM_SELECTOR).await?;
+        seed_label_routed_automation(
+            manager,
+            "Refine needs-refinement work",
+            "refine",
+            DEFAULT_REFINEMENT_PROMPT,
+            DEFAULT_REFINEMENT_SELECTOR,
+            20,
+        )
+        .await?;
+        seed_label_routed_automation(
+            manager,
+            "Verify needs-verification work",
+            "refine",
+            DEFAULT_VERIFICATION_PROMPT,
+            DEFAULT_VERIFICATION_SELECTOR,
+            10,
+        )
+        .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        delete_label_routed_automation(
+            manager,
+            "Verify needs-verification work",
+            DEFAULT_VERIFICATION_PROMPT,
+            DEFAULT_VERIFICATION_SELECTOR,
+        )
+        .await?;
+        delete_label_routed_automation(
+            manager,
+            "Refine needs-refinement work",
+            DEFAULT_REFINEMENT_PROMPT,
+            DEFAULT_REFINEMENT_SELECTOR,
+        )
+        .await?;
+        update_default_open_work_selector(manager, OLD_DEFAULT_WORK_ITEM_SELECTOR).await
+    }
+}
+
+async fn update_default_open_work_selector(
+    manager: &SchemaManager<'_>,
+    target_selector: &str,
+) -> Result<(), DbErr> {
+    let source_selector = if target_selector == DEFAULT_WORK_ITEM_SELECTOR {
+        OLD_DEFAULT_WORK_ITEM_SELECTOR
+    } else {
+        DEFAULT_WORK_ITEM_SELECTOR
+    };
+    manager
+        .get_connection()
+        .execute(Statement::from_sql_and_values(
+            manager.get_database_backend(),
+            r#"
+            UPDATE "automation_triggers"
+            SET "work_item_selector" = ?1,
+                "updated_at" = CURRENT_TIMESTAMP
+            WHERE "name" = 'Claim open work'
+              AND "activation" = 'work_item'
+              AND "effect" = 'consume_work'
+              AND "work_item_selector" = ?2;
+            "#,
+            vec![
+                target_selector.to_owned().into(),
+                source_selector.to_owned().into(),
+            ],
+        ))
+        .await
+        .map(|_| ())
+}
+
+async fn seed_label_routed_automation(
+    manager: &SchemaManager<'_>,
+    name: &str,
+    mode: &str,
+    prompt: &str,
+    selector: &str,
+    priority: i64,
+) -> Result<(), DbErr> {
+    manager
+        .get_connection()
+        .execute(Statement::from_sql_and_values(
+            manager.get_database_backend(),
+            r#"
+            INSERT INTO "automation_triggers"
+                (
+                    "project_id",
+                    "name",
+                    "enabled",
+                    "activation",
+                    "effect",
+                    "schedule",
+                    "mode",
+                    "tool_name",
+                    "prompt",
+                    "work_item_selector",
+                    "priority",
+                    "evaluation_count",
+                    "pending_evaluation_count",
+                    "last_evaluation_queued_at",
+                    "last_evaluated_at",
+                    "next_evaluation_at",
+                    "last_event_id",
+                    "created_at",
+                    "updated_at"
+                )
+            SELECT
+                "projects"."id",
+                ?1,
+                1,
+                'work_item',
+                'consume_work',
+                '@every 15s',
+                ?2,
+                COALESCE(NULLIF("projects"."default_agent_tool", ''), 'codex'),
+                ?3,
+                ?4,
+                ?5,
+                0,
+                0,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            FROM "projects"
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM "automation_triggers"
+                WHERE "automation_triggers"."project_id" = "projects"."id"
+                  AND "automation_triggers"."name" = ?6
+            );
+            "#,
+            vec![
+                name.to_owned().into(),
+                mode.to_owned().into(),
+                prompt.to_owned().into(),
+                selector.to_owned().into(),
+                priority.into(),
+                name.to_owned().into(),
+            ],
+        ))
+        .await
+        .map(|_| ())
+}
+
+async fn delete_label_routed_automation(
+    manager: &SchemaManager<'_>,
+    name: &str,
+    prompt: &str,
+    selector: &str,
+) -> Result<(), DbErr> {
+    manager
+        .get_connection()
+        .execute(Statement::from_sql_and_values(
+            manager.get_database_backend(),
+            r#"
+            DELETE FROM "automation_triggers"
+            WHERE "name" = ?1
+              AND "activation" = 'work_item'
+              AND "effect" = 'consume_work'
+              AND "prompt" = ?2
+              AND "work_item_selector" = ?3;
+            "#,
+            vec![
+                name.to_owned().into(),
+                prompt.to_owned().into(),
+                selector.to_owned().into(),
+            ],
+        ))
+        .await
+        .map(|_| ())
 }
 
 async fn seed_default_work_item_automations(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
