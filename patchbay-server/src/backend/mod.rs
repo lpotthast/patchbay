@@ -19,6 +19,8 @@ pub(crate) mod projects;
 pub(crate) mod server;
 pub(crate) mod storage;
 pub(crate) mod swim_lanes;
+pub(crate) mod work_item_comments;
 pub(crate) mod work_item_events;
+pub(crate) mod work_item_labels;
 pub(crate) mod work_item_states;
 pub(crate) mod workspace;

@@ -1,20 +1,12 @@
-use std::str::FromStr;
-
 use rootcause::{Result, prelude::*};
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-    TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, TransactionTrait};
 
 use crate::{
     backend::{
-        entities::{
-            comment::{self, Comment, CommentActiveModel, CommentModel},
-            work_item::WorkItemActiveModel,
-        },
+        entities::work_item::WorkItemActiveModel,
         events, items, projects,
         storage::{Store, utc_now},
-        work_item_events,
+        work_item_comments, work_item_events,
     },
     shared::view_models::{AuthorType, CommentView},
 };
@@ -35,6 +27,11 @@ pub async fn add_comment(
     if create.body.trim().is_empty() {
         bail!("comment body cannot be empty");
     }
+    let AddComment {
+        author_type,
+        author_name,
+        body,
+    } = create;
 
     let project_id = projects::project_id(store, project_name).await?;
     let txn = store
@@ -45,15 +42,9 @@ pub async fn add_comment(
     let item = items::get_item_model_in_tx(&txn, project_id, item_id).await?;
     let now = utc_now();
 
-    let active = CommentActiveModel {
-        work_item_id: Set(item_id),
-        author_type: Set(create.author_type.as_storage().to_owned()),
-        author_name: Set(create.author_name),
-        body: Set(create.body),
-        created_at: Set(now.clone()),
-        ..Default::default()
-    };
-    let comment = active.insert(&txn).await.context("failed to add comment")?;
+    let comment =
+        work_item_comments::insert_in_tx(&txn, item_id, author_type, author_name, body.as_str())
+            .await?;
 
     let mut item_active: WorkItemActiveModel = item.clone().into();
     item_active.version = Set(item.version + 1);
@@ -74,7 +65,7 @@ pub async fn add_comment(
     txn.commit().await.context("failed to commit comment add")?;
     events::publish_comment_changed(project_name, item_id);
 
-    model_to_view(comment)
+    work_item_comments::to_view(comment)
 }
 
 pub async fn list_comments(
@@ -85,26 +76,11 @@ pub async fn list_comments(
     let project_id = projects::project_id(store, project_name).await?;
     items::get_item_model(store, project_id, item_id).await?;
 
-    let comments = Comment::find()
-        .filter(comment::Column::WorkItemId.eq(item_id))
-        .order_by_asc(comment::Column::CreatedAt)
-        .order_by_asc(comment::Column::Id)
-        .all(store.db().as_ref())
-        .await
-        .context("failed to list comments")?;
-
-    comments.into_iter().map(model_to_view).collect()
-}
-
-fn model_to_view(comment: CommentModel) -> Result<CommentView> {
-    Ok(CommentView {
-        id: comment.id,
-        work_item_id: comment.work_item_id,
-        author_type: AuthorType::from_str(&comment.author_type)?,
-        author_name: comment.author_name,
-        body: comment.body,
-        created_at: comment.created_at,
-    })
+    work_item_comments::list_for_item(store.db().as_ref(), item_id)
+        .await?
+        .into_iter()
+        .map(work_item_comments::to_view)
+        .collect()
 }
 
 #[cfg(test)]

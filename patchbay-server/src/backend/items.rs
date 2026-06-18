@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::collections::BTreeMap;
 
 use crudkit_core::condition::Condition;
 use rootcause::{Result, prelude::*};
@@ -12,14 +12,13 @@ use crate::{
     backend::{
         entities::{
             agent_run::{self, AgentRun, AgentRunModel},
-            comment::{CommentActiveModel, CommentModel},
             work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
             work_item_event,
             work_item_label::{self, WorkItemLabel, WorkItemLabelActiveModel, WorkItemLabelModel},
         },
         events, item_labels, projects,
         storage::{Store, utc_now},
-        work_item_events,
+        work_item_comments, work_item_events, work_item_labels,
     },
     shared::view_models::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentReasoningEffort, AuthorType,
@@ -143,7 +142,9 @@ pub async fn list_items(
     let item_ids = match state {
         Some(state) => {
             let state = item_labels::normalize_state_value(state)?;
-            let ids = item_ids_with_state(store.db().as_ref(), project_id, &state).await?;
+            let ids =
+                work_item_labels::item_ids_with_state(store.db().as_ref(), project_id, &state)
+                    .await?;
             if ids.is_empty() {
                 return Ok(Vec::new());
             }
@@ -219,7 +220,7 @@ pub async fn has_unclaimed_item_matching_condition(
         .context("failed to list unclaimed work items")?;
 
     for item in items {
-        let labels = labels_for_item(store.db().as_ref(), project_id, item.id).await?;
+        let labels = work_item_labels::for_item(store.db().as_ref(), project_id, item.id).await?;
         if item_labels::is_automation_blocked(&labels) {
             continue;
         }
@@ -240,7 +241,7 @@ pub async fn item_matches_condition(
     item_labels::validate_condition(condition)?;
     let project_id = projects::project_id(store, project_name).await?;
     let item = get_item_model(store, project_id, item_id).await?;
-    let labels = labels_for_item(store.db().as_ref(), project_id, item.id).await?;
+    let labels = work_item_labels::for_item(store.db().as_ref(), project_id, item.id).await?;
     if item_labels::is_automation_blocked(&labels) {
         return Ok(false);
     }
@@ -287,7 +288,7 @@ pub async fn create_item(
         .insert(&txn)
         .await
         .context("failed to create work item")?;
-    upsert_label_in_tx(
+    work_item_labels::upsert_in_tx(
         &txn,
         project_id,
         item.id,
@@ -380,7 +381,7 @@ pub async fn update_item(
         .await?;
     }
     if let Some(state) = state {
-        upsert_label_in_tx(
+        work_item_labels::upsert_in_tx(
             &txn,
             project_id,
             item_id,
@@ -528,7 +529,7 @@ pub async fn claim_item_matching_condition(
         .context("failed to list claimable work items")?;
 
     for candidate in candidates {
-        let labels = labels_for_item(&txn, project_id, candidate.id).await?;
+        let labels = work_item_labels::for_item(&txn, project_id, candidate.id).await?;
         if item_labels::is_automation_blocked(&labels) {
             continue;
         }
@@ -596,7 +597,7 @@ pub async fn claim_specific_item(
         )
         .await;
     }
-    let labels = labels_for_item(&txn, project_id, item_id).await?;
+    let labels = work_item_labels::for_item(&txn, project_id, item_id).await?;
     let source_state = item_labels::source_state_for_new_claim(&labels);
     let claimed = claim_candidate_in_tx(
         &txn,
@@ -683,7 +684,7 @@ pub async fn progress_item(
     let item = get_item_model_in_tx(&txn, project_id, item_id).await?;
     ensure_active_claim(&item, agent_id)?;
 
-    let comment = insert_comment_in_tx(
+    let comment = work_item_comments::insert_in_tx(
         &txn,
         item_id,
         AuthorType::Agent,
@@ -706,7 +707,7 @@ pub async fn progress_item(
         .context("failed to commit item progress")?;
     events::publish_comment_changed(project_name, item_id);
 
-    comment_to_view(comment)
+    work_item_comments::to_view(comment)
 }
 
 pub async fn finish_item(
@@ -731,7 +732,7 @@ pub async fn finish_item(
     ensure_active_claim(&existing, agent_id)?;
 
     let now = utc_now();
-    insert_comment_in_tx(
+    work_item_comments::insert_in_tx(
         &txn,
         item_id,
         AuthorType::Agent,
@@ -752,7 +753,7 @@ pub async fn finish_item(
         .update(&txn)
         .await
         .context("failed to finish work item")?;
-    upsert_label_in_tx(
+    work_item_labels::upsert_in_tx(
         &txn,
         project_id,
         item_id,
@@ -760,9 +761,12 @@ pub async fn finish_item(
         Some(FINISHED_STATE_LABEL),
     )
     .await?;
-    delete_label_by_key_in_tx(&txn, project_id, item_id, CLAIMED_FROM_STATE_LABEL_KEY).await?;
-    delete_label_by_key_in_tx(&txn, project_id, item_id, AUTOMATION_BLOCKED_LABEL_KEY).await?;
-    delete_label_by_key_in_tx(&txn, project_id, item_id, FEEDBACK_REQUESTED_LABEL_KEY).await?;
+    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, CLAIMED_FROM_STATE_LABEL_KEY)
+        .await?;
+    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, AUTOMATION_BLOCKED_LABEL_KEY)
+        .await?;
+    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, FEEDBACK_REQUESTED_LABEL_KEY)
+        .await?;
     work_item_events::record_event_in_tx(&txn, project_id, Some(item_id), "item_finished", report)
         .await?;
     txn.commit().await.context("failed to commit item finish")?;
@@ -804,7 +808,7 @@ pub async fn list_item_labels(
 ) -> Result<Vec<WorkItemLabelView>> {
     let project_id = projects::project_id(store, project_name).await?;
     get_item_model(store, project_id, item_id).await?;
-    labels_for_item(store.db().as_ref(), project_id, item_id).await
+    work_item_labels::for_item(store.db().as_ref(), project_id, item_id).await
 }
 
 pub async fn list_project_labels(
@@ -877,7 +881,7 @@ pub async fn add_label(
         bail!("item already has label '{key}'");
     }
 
-    insert_label_in_tx(&txn, project_id, item_id, &key, value.as_deref()).await?;
+    work_item_labels::insert_in_tx(&txn, project_id, item_id, &key, value.as_deref()).await?;
     let updated = touch_item_in_tx(&txn, item).await?;
     let body = format!(
         "Added label {}",
@@ -1109,7 +1113,7 @@ async fn return_claim_to_source_state(
     let txn = store.db().begin().await.context(mode.start_context())?;
     let existing = get_item_model_in_tx(&txn, project_id, item_id).await?;
     ensure_active_claim(&existing, agent_id)?;
-    let labels = labels_for_item(&txn, project_id, item_id).await?;
+    let labels = work_item_labels::for_item(&txn, project_id, item_id).await?;
     let release_state = item_labels::release_state_from_claim_labels(&labels);
 
     let now = utc_now();
@@ -1122,7 +1126,7 @@ async fn return_claim_to_source_state(
     active.updated_at = Set(now);
     let updated = active.update(&txn).await.context(mode.update_context())?;
 
-    upsert_label_in_tx(
+    work_item_labels::upsert_in_tx(
         &txn,
         project_id,
         item_id,
@@ -1130,9 +1134,10 @@ async fn return_claim_to_source_state(
         Some(release_state.as_str()),
     )
     .await?;
-    delete_label_by_key_in_tx(&txn, project_id, item_id, CLAIMED_FROM_STATE_LABEL_KEY).await?;
+    work_item_labels::delete_by_key_in_tx(&txn, project_id, item_id, CLAIMED_FROM_STATE_LABEL_KEY)
+        .await?;
     if mode.blocks_automation() {
-        upsert_label_in_tx(
+        work_item_labels::upsert_in_tx(
             &txn,
             project_id,
             item_id,
@@ -1142,7 +1147,7 @@ async fn return_claim_to_source_state(
         .await?;
     }
     if mode.requests_feedback() {
-        upsert_label_in_tx(
+        work_item_labels::upsert_in_tx(
             &txn,
             project_id,
             item_id,
@@ -1156,7 +1161,7 @@ async fn return_claim_to_source_state(
         .agent_comment_body()
         .filter(|body| !body.trim().is_empty())
     {
-        insert_comment_in_tx(
+        work_item_comments::insert_in_tx(
             &txn,
             item_id,
             AuthorType::Agent,
@@ -1340,7 +1345,7 @@ async fn record_claim_in_tx<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    upsert_label_in_tx(
+    work_item_labels::upsert_in_tx(
         conn,
         project_id,
         item_id,
@@ -1348,7 +1353,7 @@ where
         Some(source_state),
     )
     .await?;
-    upsert_label_in_tx(
+    work_item_labels::upsert_in_tx(
         conn,
         project_id,
         item_id,
@@ -1356,9 +1361,10 @@ where
         Some(CLAIMED_STATE_LABEL),
     )
     .await?;
-    delete_label_by_key_in_tx(conn, project_id, item_id, FEEDBACK_REQUESTED_LABEL_KEY).await?;
+    work_item_labels::delete_by_key_in_tx(conn, project_id, item_id, FEEDBACK_REQUESTED_LABEL_KEY)
+        .await?;
     let comment_body = format!("Claimed by {agent_id}");
-    insert_comment_in_tx(
+    work_item_comments::insert_in_tx(
         conn,
         item_id,
         AuthorType::System,
@@ -1377,116 +1383,6 @@ where
     get_item_model_in_tx(conn, project_id, item_id).await
 }
 
-async fn item_ids_with_state<C>(conn: &C, project_id: i64, state: &str) -> Result<Vec<i64>>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let labels = WorkItemLabel::find()
-        .filter(work_item_label::Column::ProjectId.eq(project_id))
-        .filter(work_item_label::Column::Key.eq(STATE_LABEL_KEY))
-        .filter(work_item_label::Column::Value.eq(state))
-        .all(conn)
-        .await
-        .context_with(|| format!("failed to list items with state label '{state}'"))?;
-    Ok(labels.into_iter().map(|label| label.work_item_id).collect())
-}
-
-async fn insert_label_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-    key: &str,
-    value: Option<&str>,
-) -> Result<WorkItemLabelModel>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let now = utc_now();
-    let active = WorkItemLabelActiveModel {
-        project_id: Set(project_id),
-        work_item_id: Set(item_id),
-        key: Set(key.to_owned()),
-        value: Set(value.map(ToOwned::to_owned)),
-        created_at: Set(now.clone()),
-        updated_at: Set(now),
-        ..Default::default()
-    };
-    Ok(active.insert(conn).await.context_with(|| {
-        format!(
-            "failed to add label '{}'",
-            item_labels::format_label(key, value)
-        )
-    })?)
-}
-
-async fn upsert_label_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-    key: &str,
-    value: Option<&str>,
-) -> Result<WorkItemLabelModel>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    if let Some(existing) = WorkItemLabel::find()
-        .filter(work_item_label::Column::ProjectId.eq(project_id))
-        .filter(work_item_label::Column::WorkItemId.eq(item_id))
-        .filter(work_item_label::Column::Key.eq(key))
-        .one(conn)
-        .await
-        .context_with(|| format!("failed to load label '{key}'"))?
-    {
-        let mut active: WorkItemLabelActiveModel = existing.into();
-        active.value = Set(value.map(ToOwned::to_owned));
-        active.updated_at = Set(utc_now());
-        Ok(active
-            .update(conn)
-            .await
-            .context_with(|| format!("failed to update label '{key}'"))?)
-    } else {
-        insert_label_in_tx(conn, project_id, item_id, key, value).await
-    }
-}
-
-async fn delete_label_by_key_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-    key: &str,
-) -> Result<()>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    WorkItemLabel::delete_many()
-        .filter(work_item_label::Column::ProjectId.eq(project_id))
-        .filter(work_item_label::Column::WorkItemId.eq(item_id))
-        .filter(work_item_label::Column::Key.eq(key))
-        .exec(conn)
-        .await
-        .context_with(|| format!("failed to delete label '{key}'"))?;
-    Ok(())
-}
-
-async fn labels_for_item<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-) -> Result<Vec<WorkItemLabelView>>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let labels = WorkItemLabel::find()
-        .filter(work_item_label::Column::ProjectId.eq(project_id))
-        .filter(work_item_label::Column::WorkItemId.eq(item_id))
-        .order_by_asc(work_item_label::Column::Key)
-        .order_by_asc(work_item_label::Column::Value)
-        .all(conn)
-        .await
-        .context("failed to list item labels")?;
-    Ok(labels.into_iter().map(label_to_view).collect())
-}
-
 async fn touch_item_in_tx<C>(conn: &C, item: WorkItemModel) -> Result<WorkItemModel>
 where
     C: sea_orm::ConnectionTrait,
@@ -1501,30 +1397,6 @@ where
         .context("failed to update item version")?)
 }
 
-async fn insert_comment_in_tx<C>(
-    conn: &C,
-    item_id: i64,
-    author_type: AuthorType,
-    author_name: Option<String>,
-    body: &str,
-) -> Result<CommentModel>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let active = CommentActiveModel {
-        work_item_id: Set(item_id),
-        author_type: Set(author_type.as_storage().to_owned()),
-        author_name: Set(author_name),
-        body: Set(body.to_owned()),
-        created_at: Set(utc_now()),
-        ..Default::default()
-    };
-    Ok(active
-        .insert(conn)
-        .await
-        .context("failed to add item comment")?)
-}
-
 async fn models_to_views(
     store: &Store,
     project_id: i64,
@@ -1535,8 +1407,10 @@ async fn models_to_views(
     }
 
     let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
-    let mut labels = labels_for_items(store.db().as_ref(), project_id, &item_ids).await?;
-    let mut comment_counts = comment_counts_for_items(store.db().as_ref(), &item_ids).await?;
+    let mut labels =
+        work_item_labels::for_items(store.db().as_ref(), project_id, &item_ids).await?;
+    let mut comment_counts =
+        work_item_comments::counts_for_items(store.db().as_ref(), &item_ids).await?;
     let mut claim_sources =
         claim_sources_for_items(store.db().as_ref(), project_id, &items).await?;
 
@@ -1554,8 +1428,8 @@ async fn models_to_views(
 }
 
 async fn model_to_view(store: &Store, item: WorkItemModel) -> Result<WorkItemView> {
-    let labels = labels_for_item(store.db().as_ref(), item.project_id, item.id).await?;
-    let comment_count = comment_counts_for_items(store.db().as_ref(), &[item.id])
+    let labels = work_item_labels::for_item(store.db().as_ref(), item.project_id, item.id).await?;
+    let comment_count = work_item_comments::counts_for_items(store.db().as_ref(), &[item.id])
         .await?
         .remove(&item.id)
         .unwrap_or(0);
@@ -1567,75 +1441,6 @@ async fn model_to_view(store: &Store, item: WorkItemModel) -> Result<WorkItemVie
     .await?;
     let claim_source = claim_sources.remove(&item.id);
     work_item_view(item, labels, comment_count, claim_source)
-}
-
-async fn labels_for_items<C>(
-    conn: &C,
-    project_id: i64,
-    item_ids: &[i64],
-) -> Result<BTreeMap<i64, Vec<WorkItemLabelView>>>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let labels = WorkItemLabel::find()
-        .filter(work_item_label::Column::ProjectId.eq(project_id))
-        .filter(work_item_label::Column::WorkItemId.is_in(item_ids.iter().copied()))
-        .order_by_asc(work_item_label::Column::WorkItemId)
-        .order_by_asc(work_item_label::Column::Key)
-        .order_by_asc(work_item_label::Column::Value)
-        .all(conn)
-        .await
-        .context("failed to list item labels")?;
-
-    let mut labels_by_item = BTreeMap::<i64, Vec<WorkItemLabelView>>::new();
-    for label in labels {
-        labels_by_item
-            .entry(label.work_item_id)
-            .or_default()
-            .push(label_to_view(label));
-    }
-    Ok(labels_by_item)
-}
-
-async fn comment_counts_for_items<C>(conn: &C, item_ids: &[i64]) -> Result<BTreeMap<i64, i64>>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    if item_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let placeholders = (1..=item_ids.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let values = item_ids.iter().copied().map(Into::into).collect::<Vec<_>>();
-    let rows = conn
-        .query_all(Statement::from_sql_and_values(
-            sea_orm::DbBackend::Sqlite,
-            format!(
-                r#"
-                SELECT work_item_id, COUNT(*) AS count
-                FROM comments
-                WHERE work_item_id IN ({placeholders})
-                GROUP BY work_item_id
-                "#
-            ),
-            values,
-        ))
-        .await
-        .context("failed to count item comments")?;
-
-    let mut counts = BTreeMap::new();
-    for row in rows {
-        counts.insert(
-            row.try_get::<i64>("", "work_item_id")
-                .context("failed to read comment count item id")?,
-            row.try_get::<i64>("", "count")
-                .context("failed to read item comment count")?,
-        );
-    }
-    Ok(counts)
 }
 
 async fn claim_sources_for_items<C>(
@@ -1724,18 +1529,6 @@ fn work_item_view(
     })
 }
 
-fn label_to_view(label: WorkItemLabelModel) -> WorkItemLabelView {
-    WorkItemLabelView {
-        id: label.id,
-        project_id: label.project_id,
-        work_item_id: label.work_item_id,
-        key: label.key,
-        value: label.value,
-        created_at: label.created_at,
-        updated_at: label.updated_at,
-    }
-}
-
 fn validate_item_text(title: &str, description: &str) -> Result<()> {
     if title.trim().is_empty() {
         bail!("item title cannot be empty");
@@ -1774,17 +1567,6 @@ fn timestamp_is_before_or_equal(value: &str, cutoff: OffsetDateTime) -> bool {
     OffsetDateTime::parse(value, &Rfc3339)
         .map(|timestamp| timestamp <= cutoff)
         .unwrap_or(false)
-}
-
-fn comment_to_view(comment: CommentModel) -> Result<CommentView> {
-    Ok(CommentView {
-        id: comment.id,
-        work_item_id: comment.work_item_id,
-        author_type: AuthorType::from_str(&comment.author_type)?,
-        author_name: comment.author_name,
-        body: comment.body,
-        created_at: comment.created_at,
-    })
 }
 
 #[cfg(test)]
@@ -2059,7 +1841,7 @@ mod tests {
         .await
         .unwrap();
         let project_id = projects::project_id(&store, "demo").await.unwrap();
-        delete_label_by_key_in_tx(
+        work_item_labels::delete_by_key_in_tx(
             store.db().as_ref(),
             project_id,
             unlabeled.id,
