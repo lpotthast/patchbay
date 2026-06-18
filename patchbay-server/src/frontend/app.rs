@@ -2217,6 +2217,46 @@ fn format_number(value: i64) -> String {
     formatted
 }
 
+fn without_crudkit_field<F: TypeErasedField>(
+    elements: Vec<Elem<F>>,
+    field_name: &str,
+) -> Vec<Elem<F>> {
+    elements
+        .into_iter()
+        .filter_map(|element| match element {
+            Elem::Field((field, _)) if field.name() == field_name => None,
+            Elem::Enclosing(enclosing) => Some(Elem::Enclosing(without_crudkit_enclosing_field(
+                enclosing, field_name,
+            ))),
+            element => Some(element),
+        })
+        .collect()
+}
+
+fn without_crudkit_enclosing_field<F: TypeErasedField>(
+    enclosing: Enclosing<F>,
+    field_name: &str,
+) -> Enclosing<F> {
+    match enclosing {
+        Enclosing::None(mut group) => {
+            group.children = without_crudkit_field(group.children, field_name);
+            Enclosing::None(group)
+        }
+        Enclosing::Tabs(tabs) => Enclosing::Tabs(
+            tabs.into_iter()
+                .map(|mut tab| {
+                    tab.group.children = without_crudkit_field(tab.group.children, field_name);
+                    tab
+                })
+                .collect(),
+        ),
+        Enclosing::Card(mut group) => {
+            group.children = without_crudkit_field(group.children, field_name);
+            Enclosing::Card(group)
+        }
+    }
+}
+
 fn item_content(page: ItemPage) -> AnyView {
     let ItemPage {
         projects,
@@ -2246,7 +2286,7 @@ fn item_content(page: ItemPage) -> AnyView {
         encode_path(&project),
         item.id
     );
-    let header_title = item.title.clone();
+    let header_title = format!("#{} {}", item.id, item.title);
     let item_state_display = state_label(&item).to_owned();
     let item_project_id = item.project_id;
     let item_id = item.id;
@@ -2262,18 +2302,20 @@ fn item_content(page: ItemPage) -> AnyView {
         show_delete: true,
         ..CrudNavigationConfig::embedded_single_entity()
     };
+    let mut item_detail_config = work_items_crudkit_config_for_view(
+        api_base_url,
+        item_project_id,
+        SerializableCrudView::Edit(crudkit_i64_id(item_id)),
+        item_detail_navigation,
+        editor_default_create_state,
+        None,
+    );
+    item_detail_config.elements = without_crudkit_field(item_detail_config.elements, "id");
     let item_editor = view! {
         <div class="crudkit-item-detail" data-crudkit-leptos="work-item-detail">
             <CrudInstance
                 name="work-item-detail"
-                config=work_items_crudkit_config_for_view(
-                    api_base_url,
-                    item_project_id,
-                    SerializableCrudView::Edit(crudkit_i64_id(item_id)),
-                    item_detail_navigation,
-                    editor_default_create_state,
-                    None,
-                )
+                config=item_detail_config
                 on_exit=exit_to_board
                 on_context_created=Callback::new(move |context| {
                     set_item_editor_context.set(Some(context));
