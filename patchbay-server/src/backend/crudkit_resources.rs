@@ -21,7 +21,7 @@ use crate::{
         },
         events, item_labels, projects,
         storage::{Store, utc_now},
-        swim_lanes, work_item_events, work_item_states,
+        swim_lanes, work_item_events, work_item_labels, work_item_states,
     },
     shared::view_models::{
         AgentReasoningEffort, AgentSandboxMode, AgentToolName, AutomationActivation,
@@ -420,6 +420,21 @@ impl fmt::Display for WorkItemHookError {
 
 impl std::error::Error for WorkItemHookError {}
 
+#[derive(Clone, Debug, PartialEq, Eq, ToSchema, serde::Deserialize, serde::Serialize)]
+pub struct CrudInitialWorkItemLabel {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+impl From<item_labels::NormalizedLabel> for CrudInitialWorkItemLabel {
+    fn from(label: item_labels::NormalizedLabel) -> Self {
+        Self {
+            key: label.key,
+            value: label.value,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, crudkit_sea_orm::CkField, ToSchema, serde::Deserialize)]
 pub struct CrudCreateWorkItem {
     pub project_id: i64,
@@ -429,6 +444,8 @@ pub struct CrudCreateWorkItem {
     pub state: Option<String>,
     pub agent_model_override: Option<String>,
     pub agent_reasoning_effort_override: Option<String>,
+    #[serde(default)]
+    pub initial_labels: serde_json::Value,
 }
 
 impl crudkit_rs::data::CreateModel for CrudCreateWorkItem {}
@@ -521,6 +538,19 @@ impl Repository<CrudWorkItemResource> for WorkItemRepository {
             .insert(&txn)
             .await
             .map_err(WorkItemRepositoryError::Db)?;
+        let initial_labels = normalized_work_item_initial_labels(create_model.initial_labels)
+            .map_err(WorkItemRepositoryError::Internal)?;
+        for label in &initial_labels {
+            work_item_labels::insert_in_tx(
+                &txn,
+                model.project_id,
+                model.id,
+                &label.key,
+                label.value.as_deref(),
+            )
+            .await
+            .map_err(|err| WorkItemRepositoryError::Internal(err.to_string()))?;
+        }
         work_item_events::record_event_in_tx(
             &txn,
             model.project_id,
@@ -679,6 +709,10 @@ impl CrudLifetime<CrudWorkItemResource> for WorkItemLifetime {
         validate_work_item_text(&create_model.title, &create_model.description)?;
         let normalized_state = normalize_work_item_create_state(create_model.state.take())?;
         create_model.state = Some(normalized_state);
+        create_model.initial_labels = serde_json::to_value(normalize_work_item_initial_labels(
+            std::mem::take(&mut create_model.initial_labels),
+        )?)
+        .map_err(|err| work_item_unprocessable_error(err.to_string()))?;
         create_model.agent_model_override =
             projects::normalize_optional(create_model.agent_model_override.take());
         create_model.agent_reasoning_effort_override = create_model
@@ -803,6 +837,30 @@ fn normalize_work_item_create_state(
         projects::normalize_optional(state).unwrap_or_else(|| DEFAULT_STATE_LABEL.to_owned()),
     )
     .map_err(|err| work_item_unprocessable_error(err.to_string()))
+}
+
+fn normalize_work_item_initial_labels(
+    labels: serde_json::Value,
+) -> Result<Vec<CrudInitialWorkItemLabel>, HookError<WorkItemHookError>> {
+    normalized_work_item_initial_labels(labels).map_err(work_item_unprocessable_error)
+}
+
+fn normalized_work_item_initial_labels(
+    labels: serde_json::Value,
+) -> Result<Vec<CrudInitialWorkItemLabel>, String> {
+    let labels = match labels {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::String(raw) if raw.trim().is_empty() => Vec::new(),
+        serde_json::Value::String(raw) => {
+            serde_json::from_str::<Vec<CrudInitialWorkItemLabel>>(&raw)
+                .map_err(|err| format!("invalid initial labels JSON: {err}"))?
+        }
+        value => serde_json::from_value::<Vec<CrudInitialWorkItemLabel>>(value)
+            .map_err(|err| format!("invalid initial labels: {err}"))?,
+    };
+    item_labels::normalize_initial_labels(labels.into_iter().map(|label| (label.key, label.value)))
+        .map(|labels| labels.into_iter().map(Into::into).collect())
+        .map_err(|err| err.to_string())
 }
 
 fn work_item_unprocessable_error(reason: String) -> HookError<WorkItemHookError> {

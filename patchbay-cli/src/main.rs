@@ -582,6 +582,7 @@ async fn run_item(command: ItemCommand, context: ResolvedContext) -> Result<()> 
                         state: args.state,
                         agent_model_override: args.agent_model,
                         agent_reasoning_effort_override: args.agent_reasoning_effort,
+                        initial_labels: Vec::new(),
                     },
                 )
                 .await?;

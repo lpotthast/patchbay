@@ -706,6 +706,7 @@ async fn create_work_item_from_trigger(
             state: crate::shared::view_models::DEFAULT_STATE_LABEL.to_owned(),
             agent_model_override: None,
             agent_reasoning_effort_override: None,
+            initial_labels: Vec::new(),
         },
     )
     .await
@@ -1373,6 +1374,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1396,6 +1398,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1550,6 +1553,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await

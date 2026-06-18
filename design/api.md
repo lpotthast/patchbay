@@ -33,6 +33,14 @@ GET   /api/projects/{project}/items/{item_id}
 PATCH /api/projects/{project}/items/{item_id}
 ```
 
+`POST /items` creates the item, its canonical `state=<value>` label, and any
+`initial_labels` supplied in the request in one server-side operation. Initial
+labels use the same key/value shape as label-create requests; keys and values
+are trimmed, empty values become value-less labels, duplicate keys are rejected,
+and `state` must be supplied through the create request's `state` field rather
+than duplicated in `initial_labels`. The backwards-compatible `labels` alias is
+accepted for `initial_labels`.
+
 Work item relationship endpoints:
 
 ```text

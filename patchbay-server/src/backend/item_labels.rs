@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crudkit_core::condition::{
     Condition, ConditionClause, ConditionClauseValue, ConditionElement, Operator,
 };
@@ -10,6 +12,12 @@ use crate::shared::view_models::{
 
 pub(crate) struct ValidatedLabelCondition<'a> {
     condition: &'a Condition,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NormalizedLabel {
+    pub(crate) key: String,
+    pub(crate) value: Option<String>,
 }
 
 impl<'a> ValidatedLabelCondition<'a> {
@@ -87,6 +95,27 @@ pub(crate) fn validate_pair(key: &str, value: Option<&str>) -> Result<()> {
         bail!("state label requires a value");
     }
     Ok(())
+}
+
+pub(crate) fn normalize_initial_labels<I>(labels: I) -> Result<Vec<NormalizedLabel>>
+where
+    I: IntoIterator<Item = (String, Option<String>)>,
+{
+    let mut normalized = Vec::new();
+    let mut keys = BTreeSet::new();
+    for (key, value) in labels {
+        let key = normalize_key(key)?;
+        let value = normalize_value(value);
+        validate_pair(&key, value.as_deref())?;
+        if key == STATE_LABEL_KEY {
+            bail!("initial labels cannot include 'state'; use the state selector");
+        }
+        if !keys.insert(key.clone()) {
+            bail!("duplicate initial label key '{key}'");
+        }
+        normalized.push(NormalizedLabel { key, value });
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn validate_condition(condition: &Condition) -> Result<()> {

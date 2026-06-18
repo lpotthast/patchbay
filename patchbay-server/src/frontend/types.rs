@@ -297,6 +297,7 @@ pub mod work_item {
         pub state: String,
         pub agent_model_override: Option<String>,
         pub agent_reasoning_effort_override: Option<String>,
+        pub initial_labels: String,
     }
 
     #[derive(Clone, PartialEq, Eq, Debug, CkId, CkField, Serialize, Deserialize)]

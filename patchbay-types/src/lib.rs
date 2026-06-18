@@ -1329,6 +1329,8 @@ pub struct CreateWorkItemRequest {
     pub state: Option<String>,
     pub agent_model_override: Option<String>,
     pub agent_reasoning_effort_override: Option<AgentReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "labels")]
+    pub initial_labels: Vec<CreateWorkItemLabelRequest>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1453,5 +1455,41 @@ mod tests {
             r#""read_only""#
         );
         assert!("readonly-ish".parse::<AutomationRunMutability>().is_err());
+    }
+
+    #[test]
+    fn create_work_item_request_defaults_missing_initial_labels() {
+        let request: CreateWorkItemRequest = serde_json::from_value(serde_json::json!({
+            "title": "Backwards compatible",
+            "description": "Older callers do not send labels",
+            "state": "open",
+            "agent_model_override": null,
+            "agent_reasoning_effort_override": null
+        }))
+        .unwrap();
+
+        assert!(request.initial_labels.is_empty());
+    }
+
+    #[test]
+    fn create_work_item_request_accepts_labels_alias() {
+        let request: CreateWorkItemRequest = serde_json::from_value(serde_json::json!({
+            "title": "Alias",
+            "description": "Accepts labels as an alias",
+            "state": "open",
+            "agent_model_override": null,
+            "agent_reasoning_effort_override": null,
+            "labels": [
+                { "key": "type", "value": "feature" },
+                { "key": "needs-verification", "value": null }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(request.initial_labels.len(), 2);
+        assert_eq!(request.initial_labels[0].key, "type");
+        assert_eq!(request.initial_labels[0].value.as_deref(), Some("feature"));
+        assert_eq!(request.initial_labels[1].key, "needs-verification");
+        assert!(request.initial_labels[1].value.is_none());
     }
 }

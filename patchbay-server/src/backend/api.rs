@@ -143,6 +143,7 @@ pub(crate) async fn create_item(
                     .unwrap_or_else(|| DEFAULT_STATE_LABEL.to_owned()),
                 agent_model_override: request.agent_model_override,
                 agent_reasoning_effort_override: request.agent_reasoning_effort_override,
+                initial_labels: request.initial_labels,
             },
         )
         .await,
@@ -514,6 +515,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -627,6 +629,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -677,6 +680,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -740,6 +744,79 @@ mod tests {
         assert_eq!(updated.title, "Endpoint update");
         assert_eq!(updated.state.as_deref(), Some("review"));
         assert_eq!(updated.version, original.version + 1);
+    }
+
+    #[tokio::test]
+    async fn create_endpoint_defaults_missing_labels_and_accepts_initial_labels() {
+        let (_temp, state, _item_id) = test_state().await;
+        let backwards_compatible: CreateWorkItemRequest =
+            serde_json::from_value(serde_json::json!({
+                "title": "No labels request",
+                "description": "Older client payload",
+                "state": "open",
+                "agent_model_override": null,
+                "agent_reasoning_effort_override": null
+            }))
+            .unwrap();
+
+        let created_without_labels: WorkItemView = decode(
+            create_item(
+                Extension(state.clone()),
+                Path("demo".to_owned()),
+                Json(backwards_compatible),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(created_without_labels.state.as_deref(), Some("open"));
+        assert_eq!(
+            created_without_labels
+                .labels
+                .iter()
+                .filter(|label| label.key != patchbay_types::STATE_LABEL_KEY)
+                .count(),
+            0
+        );
+
+        let created_with_labels: WorkItemView = decode(
+            create_item(
+                Extension(state),
+                Path("demo".to_owned()),
+                Json(CreateWorkItemRequest {
+                    title: "Initial labels request".to_owned(),
+                    description: "New client payload".to_owned(),
+                    state: Some("review".to_owned()),
+                    agent_model_override: None,
+                    agent_reasoning_effort_override: None,
+                    initial_labels: vec![
+                        CreateWorkItemLabelRequest {
+                            key: "type".to_owned(),
+                            value: Some("feature".to_owned()),
+                        },
+                        CreateWorkItemLabelRequest {
+                            key: "needs-verification".to_owned(),
+                            value: None,
+                        },
+                    ],
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(created_with_labels.state.as_deref(), Some("review"));
+        assert!(
+            created_with_labels
+                .labels
+                .iter()
+                .any(|label| { label.key == "type" && label.value.as_deref() == Some("feature") })
+        );
+        assert!(
+            created_with_labels
+                .labels
+                .iter()
+                .any(|label| label.key == "needs-verification" && label.value.is_none())
+        );
     }
 
     #[tokio::test]
@@ -826,6 +903,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await

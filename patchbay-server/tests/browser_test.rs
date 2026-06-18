@@ -416,9 +416,13 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
             "Created through browser-test\nSecond line",
         )
         .await?;
+        append_new_item_initial_label(driver, "area", "browser").await?;
+        append_new_item_initial_label(driver, "needs-verification", "").await?;
         click_new_item_save(driver).await?;
 
         find(driver, By::LinkText("Browser item")).await?;
+        assert_board_card_contains(driver, "Browser item", "area=browser").await?;
+        assert_board_card_contains(driver, "Browser item", "needs-verification").await?;
         assert_source_contains(driver, "Created through browser-test").await?;
         assert_source_contains(driver, "state=idea").await?;
 
@@ -426,6 +430,8 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         find(driver, By::Css("section.item-settings")).await?;
         find(driver, By::Css("section.comments")).await?;
         assert_source_contains(driver, "Item details").await?;
+        assert_source_contains(driver, "area=browser").await?;
+        assert_source_contains(driver, "needs-verification").await?;
         assert_item_detail_description_is_not_duplicated(driver).await?;
         assert_item_detail_description_editor_accepts_click_and_text(driver).await?;
         let relationship_target_id = create_relationship_target_item(driver).await?;
@@ -1564,6 +1570,22 @@ async fn assert_new_item_modal_dirty_leave_protection(driver: &WebDriver) -> Res
     find_leave_modal(driver).await?;
     click_leave_modal_accept(driver).await?;
     wait_for_new_item_modal_closed(driver).await?;
+
+    open_new_item_modal(driver).await?;
+    append_new_item_initial_label(driver, "area", "unsaved").await?;
+    click(
+        driver,
+        By::Css("#new-item-modal leptonic-modal-header button"),
+    )
+    .await?;
+    find_leave_modal(driver).await?;
+    click_leave_modal_cancel(driver).await?;
+    assert_new_item_initial_label_value(driver, "area", "unsaved").await?;
+
+    click_backdrop(driver).await?;
+    find_leave_modal(driver).await?;
+    click_leave_modal_accept(driver).await?;
+    wait_for_new_item_modal_closed(driver).await?;
     Ok(())
 }
 
@@ -1657,6 +1679,114 @@ async fn assert_new_item_title_value(driver: &WebDriver, expected: &str) -> Resu
         .convert::<String>()
         .context("failed to read new item title draft")?;
     assert_that!(value).is_equal_to(expected.to_owned());
+    Ok(())
+}
+
+async fn append_new_item_initial_label(
+    driver: &WebDriver,
+    key: &str,
+    value: &str,
+) -> Result<(), Report> {
+    let script = format!(
+        r#"
+        const done = arguments[0];
+        const key = {key:?};
+        const value = {value:?};
+        const add = document.querySelector('#new-item-modal .initial-label-add');
+        if (!add) {{
+            done('missing add button');
+            return;
+        }}
+        const before = document.querySelectorAll('#new-item-modal .initial-label-row').length;
+        add.click();
+        const deadline = Date.now() + 5000;
+        const setValue = (input, next) => {{
+            input.value = next;
+            input.setAttribute('value', next);
+            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        }};
+        const fill = () => {{
+            const rows = document.querySelectorAll('#new-item-modal .initial-label-row');
+            if (rows.length <= before) {{
+                if (Date.now() > deadline) {{
+                    done(`row count stayed at ${{before}}`);
+                    return;
+                }}
+                setTimeout(fill, 100);
+                return;
+            }}
+            const row = rows[rows.length - 1];
+            const keyInput = row.querySelector('.initial-label-key');
+            const valueInput = row.querySelector('.initial-label-value');
+            if (!keyInput || !valueInput) {{
+                done('missing row inputs');
+                return;
+            }}
+            setValue(keyInput, key);
+            setValue(valueInput, value);
+            done('ok');
+        }};
+        fill();
+        "#
+    );
+    let result = driver
+        .execute_async(script, Vec::new())
+        .await
+        .context("failed to append new item initial label")?
+        .convert::<String>()
+        .context("failed to read initial label append result")?;
+    if result != "ok" {
+        bail!("failed to append new item initial label: {result}");
+    }
+    Ok(())
+}
+
+async fn assert_new_item_initial_label_value(
+    driver: &WebDriver,
+    expected_key: &str,
+    expected_value: &str,
+) -> Result<(), Report> {
+    let summary = driver
+        .execute(
+            r#"
+            const row = document.querySelector('#new-item-modal .initial-label-row');
+            const key = row?.querySelector('.initial-label-key')?.value ?? '<missing>';
+            const value = row?.querySelector('.initial-label-value')?.value ?? '<missing>';
+            return `${key}|${value}`;
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to inspect initial label draft")?
+        .convert::<String>()
+        .context("failed to read initial label draft")?;
+    assert_that!(summary).is_equal_to(format!("{expected_key}|{expected_value}"));
+    Ok(())
+}
+
+async fn assert_board_card_contains(
+    driver: &WebDriver,
+    title: &str,
+    expected: &str,
+) -> Result<(), Report> {
+    let script = format!(
+        r#"
+        const title = {title:?};
+        const expected = {expected:?};
+        const link = Array.from(document.querySelectorAll('article.card a'))
+            .find((link) => (link.textContent ?? '').includes(title));
+        const card = link?.closest('article.card');
+        return card ? String((card.textContent ?? '').includes(expected)) : 'missing-card';
+        "#
+    );
+    let result = driver
+        .execute(script, Vec::new())
+        .await
+        .context("failed to inspect board card labels")?
+        .convert::<String>()
+        .context("failed to read board card label summary")?;
+    assert_that!(result).is_equal_to("true".to_owned());
     Ok(())
 }
 

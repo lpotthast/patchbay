@@ -41,6 +41,7 @@ pub(crate) async fn board_page_data(
     let mut project_items = Vec::new();
     let mut project_swim_lanes = Vec::new();
     let mut project_work_item_states = Vec::new();
+    let mut label_suggestions = Vec::new();
     let mut misconfigured_item_count = 0;
     if let Some(project) = selected_project_view
         .as_ref()
@@ -55,6 +56,7 @@ pub(crate) async fn board_page_data(
         project_items = items::list_items(store, project, None).await?;
         project_swim_lanes = swim_lanes::list_swim_lanes(store, project).await?;
         project_work_item_states = work_item_states::list_work_item_states(store, project).await?;
+        label_suggestions = item_label_service::list_project_labels(store, project).await?;
         misconfigured_item_count =
             items::count_items_outside_work_item_states(store, project).await?;
     }
@@ -73,6 +75,7 @@ pub(crate) async fn board_page_data(
         items: project_items,
         swim_lanes: project_swim_lanes,
         work_item_states: project_work_item_states,
+        label_suggestions,
         misconfigured_item_count,
         api_base_url,
         codex_status,

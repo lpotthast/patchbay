@@ -22,7 +22,7 @@ use crate::{
     },
     shared::view_models::{
         AUTOMATION_BLOCKED_LABEL_KEY, AgentReasoningEffort, AuthorType,
-        CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL, CommentView,
+        CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL, CommentView, CreateWorkItemLabelRequest,
         FEEDBACK_REQUESTED_LABEL_KEY, FINISHED_STATE_LABEL, RecoveredClaimView, STATE_LABEL_KEY,
         WorkItemEventView, WorkItemLabelView, WorkItemView,
     },
@@ -35,6 +35,7 @@ pub struct CreateWorkItem {
     pub state: String,
     pub agent_model_override: Option<String>,
     pub agent_reasoning_effort_override: Option<AgentReasoningEffort>,
+    pub initial_labels: Vec<CreateWorkItemLabelRequest>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -275,6 +276,13 @@ pub async fn create_item(
     validate_item_text(&create.title, &create.description)?;
     let state_label = item_labels::normalize_state_value(create.state)?;
     let agent_model_override = projects::normalize_optional(create.agent_model_override);
+    let initial_labels = item_labels::normalize_initial_labels(
+        create
+            .initial_labels
+            .into_iter()
+            .map(|label| (label.key, label.value)),
+    )
+    .context("invalid initial labels")?;
 
     let project_id = projects::project_id(store, project_name).await?;
     let now = utc_now();
@@ -309,6 +317,16 @@ pub async fn create_item(
         Some(state_label.as_str()),
     )
     .await?;
+    for label in &initial_labels {
+        work_item_labels::insert_in_tx(
+            &txn,
+            project_id,
+            item.id,
+            &label.key,
+            label.value.as_deref(),
+        )
+        .await?;
+    }
     work_item_events::record_event_in_tx(
         &txn,
         project_id,
@@ -1255,6 +1273,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1268,6 +1287,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1299,6 +1319,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1319,6 +1340,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creating_item_with_initial_labels_persists_normalized_labels() {
+        let (_temp, store) = test_store().await;
+
+        let item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Labeled create".to_owned(),
+                description: "Initial labels should be visible immediately".to_owned(),
+                state: " open ".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+                initial_labels: vec![
+                    CreateWorkItemLabelRequest {
+                        key: " type ".to_owned(),
+                        value: Some(" feature ".to_owned()),
+                    },
+                    CreateWorkItemLabelRequest {
+                        key: "needs-verification".to_owned(),
+                        value: Some("  ".to_owned()),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(item.state.as_deref(), Some("open"));
+        assert!(item.labels.iter().any(|label| {
+            label.key == STATE_LABEL_KEY && label.value.as_deref() == Some("open")
+        }));
+        assert!(
+            item.labels
+                .iter()
+                .any(|label| { label.key == "type" && label.value.as_deref() == Some("feature") })
+        );
+        assert!(
+            item.labels
+                .iter()
+                .any(|label| label.key == "needs-verification" && label.value.is_none())
+        );
+
+        let listed = list_items(&store, "demo", None).await.unwrap();
+        let listed_item = listed
+            .iter()
+            .find(|candidate| candidate.id == item.id)
+            .unwrap();
+        assert!(
+            listed_item
+                .labels
+                .iter()
+                .any(|label| { label.key == "type" && label.value.as_deref() == Some("feature") })
+        );
+        assert!(
+            listed_item
+                .labels
+                .iter()
+                .any(|label| label.key == "needs-verification" && label.value.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_initial_labels_reject_create_without_partial_item() {
+        let (_temp, store) = test_store().await;
+
+        let err = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Duplicate labels".to_owned(),
+                description: "Should not create anything".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+                initial_labels: vec![
+                    CreateWorkItemLabelRequest {
+                        key: " area ".to_owned(),
+                        value: Some("frontend".to_owned()),
+                    },
+                    CreateWorkItemLabelRequest {
+                        key: "area".to_owned(),
+                        value: Some("backend".to_owned()),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate initial label key"));
+        assert!(list_items(&store, "demo", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_initial_label_key_rejects_create_without_partial_item() {
+        let (_temp, store) = test_store().await;
+
+        let err = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Invalid label".to_owned(),
+                description: "Should not create anything".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+                initial_labels: vec![CreateWorkItemLabelRequest {
+                    key: "bad=key".to_owned(),
+                    value: Some("value".to_owned()),
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("label key cannot contain '='"));
+        assert!(list_items(&store, "demo", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn state_initial_label_rejects_create_without_partial_item() {
+        let (_temp, store) = test_store().await;
+
+        let err = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "State collision".to_owned(),
+                description: "State belongs to the selector".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+                initial_labels: vec![CreateWorkItemLabelRequest {
+                    key: STATE_LABEL_KEY.to_owned(),
+                    value: Some("review".to_owned()),
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("use the state selector"));
+        assert!(list_items(&store, "demo", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn blank_state_selector_rejects_create_without_partial_item() {
+        let (_temp, store) = test_store().await;
+
+        let err = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Blank state".to_owned(),
+                description: "State cannot be blank".to_owned(),
+                state: "  ".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+                initial_labels: vec![CreateWorkItemLabelRequest {
+                    key: "type".to_owned(),
+                    value: Some("feature".to_owned()),
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("state label value cannot be empty")
+        );
+        assert!(list_items(&store, "demo", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn list_items_hydrates_labels_state_and_comment_counts() {
         let (_temp, store) = test_store().await;
         let first = create_item(
@@ -1330,6 +1526,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1343,6 +1540,7 @@ mod tests {
                 state: "ready".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1422,6 +1620,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1435,6 +1634,7 @@ mod tests {
                 state: "needs_triage".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1448,6 +1648,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1461,6 +1662,7 @@ mod tests {
                 state: "needs_triage".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1498,6 +1700,7 @@ mod tests {
                 state: "needs_triage".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1536,6 +1739,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1567,6 +1771,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1623,6 +1828,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1659,6 +1865,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1682,6 +1889,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1725,6 +1933,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1738,6 +1947,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1804,6 +2014,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1866,6 +2077,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1900,6 +2112,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1922,6 +2135,7 @@ mod tests {
                 state: "idea".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -1961,6 +2175,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2042,6 +2257,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2055,6 +2271,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2123,6 +2340,7 @@ mod tests {
                 state: "ready".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2181,6 +2399,7 @@ mod tests {
                 state: "ready".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2253,6 +2472,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2285,6 +2505,7 @@ mod tests {
                 state: "triage".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2336,6 +2557,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2382,6 +2604,7 @@ mod tests {
                 state: "ready".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2434,6 +2657,7 @@ mod tests {
                 state: "triage".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2484,6 +2708,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2519,6 +2744,7 @@ mod tests {
                 state: "ready".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2579,6 +2805,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2623,6 +2850,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await
@@ -2658,6 +2886,7 @@ mod tests {
                 state: "open".to_owned(),
                 agent_model_override: None,
                 agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
             },
         )
         .await

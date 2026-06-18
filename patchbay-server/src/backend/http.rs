@@ -1295,6 +1295,7 @@ async fn create_item(
                 Ok(value) => value,
                 Err(err) => return error_response(err).await,
             },
+            initial_labels: Vec::new(),
         },
     )
     .await

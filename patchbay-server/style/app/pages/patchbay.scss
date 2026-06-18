@@ -2401,7 +2401,7 @@ dd {
 }
 
 .new-item-modal {
-  width: min(560px, calc(100vw - 32px));
+  width: min(640px, calc(100vw - 32px));
   padding: 0;
   border: 1px solid $border;
   border-radius: 8px;
@@ -2465,6 +2465,46 @@ dd {
     .leptonic-btn-wrapper {
       display: inline-flex;
     }
+  }
+}
+
+.initial-labels-field {
+  display: grid;
+  gap: 8px;
+}
+
+.initial-label-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.initial-label-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(150px, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+.initial-label-add {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-self: start;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.initial-label-remove {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+
+  svg {
+    width: 15px;
+    height: 15px;
   }
 }
 
@@ -2536,7 +2576,8 @@ dd {
   .relationship-row,
   .relationship-add-form,
   .relationship-kind-form,
-  .label-row form {
+  .label-row form,
+  .initial-label-row {
     grid-template-columns: 1fr;
   }
 
