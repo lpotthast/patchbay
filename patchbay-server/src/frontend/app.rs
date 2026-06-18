@@ -2115,6 +2115,8 @@ fn automation_runs_view(project: &str, runs: Vec<AgentRunView>) -> AnyView {
                     <a href=href>"#" {run.id}</a>
                     " · "
                     {run.status.to_string()}
+                    " · "
+                    {run.mutability.to_string()}
                     {tokens.map(|tokens| view! {
                         <>
                             " · "
@@ -2224,6 +2226,8 @@ fn run_log_content(page: RunLogPage) -> AnyView {
                         })}
                         <dt>"result"</dt>
                         <dd class=format!("run-result-inline {status_class}")>{summary}</dd>
+                        <dt>"mutability"</dt>
+                        <dd>{run_log.run.mutability.to_string()}</dd>
                         <dt>"command"</dt>
                         <dd>{command}</dd>
                         <dt>"working dir"</dt>
@@ -2512,6 +2516,13 @@ fn projects_crudkit_config(api_base_url: String) -> CrudInstanceConfig {
                     ProjectField::MaxCodeEditAgents,
                     FieldOptions {
                         label: Some(Label::new("Max agents")),
+                        ..Default::default()
+                    },
+                ),
+                Elem::field(
+                    ProjectField::MaxReadOnlyAgents,
+                    FieldOptions {
+                        label: Some(Label::new("Read-only agents")),
                         ..Default::default()
                     },
                 ),
@@ -3523,7 +3534,7 @@ fn automation_triggers_crudkit_config(
     project_id: i64,
     kind: AutomationTableKind,
 ) -> CrudInstanceConfig {
-    let list_columns = vec![
+    let mut list_columns = vec![
         Header::showing(
             ReadAutomationTriggerField::Id,
             HeaderOptions {
@@ -3593,6 +3604,19 @@ fn automation_triggers_crudkit_config(
             },
         ),
     ];
+    if matches!(kind, AutomationTableKind::Consuming) {
+        list_columns.insert(
+            4,
+            Header::showing(
+                ReadAutomationTriggerField::Mutability,
+                HeaderOptions {
+                    display_name: "Mutability".into(),
+                    min_width: true,
+                    ..Default::default()
+                },
+            ),
+        );
+    }
     let mut create_children = vec![
         Elem::create_field(
             CreateAutomationTriggerField::Name,
@@ -3631,6 +3655,13 @@ fn automation_triggers_crudkit_config(
         ),
     ];
     if matches!(kind, AutomationTableKind::Consuming) {
+        create_children.push(Elem::create_field(
+            CreateAutomationTriggerField::Mutability,
+            FieldOptions {
+                label: Some(Label::new("Mutability")),
+                ..Default::default()
+            },
+        ));
         create_children.push(Elem::create_field(
             CreateAutomationTriggerField::WorkItemSelector,
             FieldOptions {
@@ -3694,6 +3725,13 @@ fn automation_triggers_crudkit_config(
     ];
     if matches!(kind, AutomationTableKind::Consuming) {
         update_children.push(Elem::field(
+            AutomationTriggerField::Mutability,
+            FieldOptions {
+                label: Some(Label::new("Mutability")),
+                ..Default::default()
+            },
+        ));
+        update_children.push(Elem::field(
             AutomationTriggerField::WorkItemSelector,
             FieldOptions {
                 label: Some(Label::new("Work item selector")),
@@ -3742,6 +3780,13 @@ fn automation_triggers_crudkit_config(
                 CreateAutomationTriggerField::Prompt,
                 rich_text_field_renderer::<DynCreateField>("Prompt"),
             )
+            .register(
+                CreateAutomationTriggerField::Mutability,
+                select_field_renderer::<DynCreateField>(
+                    &[("mutating", "mutating"), ("read_only", "read_only")],
+                    false,
+                ),
+            )
             .build(),
         update_field_renderer: FieldRendererRegistry::builder()
             .register(
@@ -3751,6 +3796,13 @@ fn automation_triggers_crudkit_config(
             .register(
                 AutomationTriggerField::Prompt,
                 rich_text_field_renderer::<DynUpdateField>("Prompt"),
+            )
+            .register(
+                AutomationTriggerField::Mutability,
+                select_field_renderer::<DynUpdateField>(
+                    &[("mutating", "mutating"), ("read_only", "read_only")],
+                    false,
+                ),
             )
             .build(),
     }
@@ -4667,12 +4719,16 @@ fn LiveRunsSection(
     let status_note = Signal::derive(move || {
         let status = automation_status.get();
         let running_runs = status.running_runs;
+        let mutating = status.running_mutating_runs;
+        let read_only = status.running_read_only_runs;
         let controller = if automation_running.get() {
             "controller running"
         } else {
             "controller stopped"
         };
-        Some(format!("{running_runs} running, {controller}"))
+        Some(format!(
+            "{running_runs} running ({mutating} mutating, {read_only} read-only), {controller}"
+        ))
     });
 
     view! {
@@ -4700,6 +4756,7 @@ fn project_settings_view(
     let memory_action = format!("/projects/{}/memory", encode_path(project));
     let commit_policy_action = format!("/projects/{}/settings/commit-policy", encode_path(project));
     let commit_standard = settings.commit_standard.clone();
+    let max_read_only_agents = settings.max_read_only_agents.to_string();
     let manual_revert_selected = settings.revert_strategy == RevertStrategy::Manual;
     let git_reset_selected = settings.revert_strategy == RevertStrategy::GitReset;
     let git_policy = settings.agent_git_command_policy.clone();
@@ -4875,6 +4932,15 @@ fn project_settings_view(
             <div class="commit-policy">
                 <h2>"Automation policy"</h2>
                 <form method="post" action=commit_policy_action>
+                    <label for="project-max-read-only-agents">"Read-only agents"</label>
+                    <input
+                        id="project-max-read-only-agents"
+                        type="number"
+                        min="0"
+                        step="1"
+                        name="max_read_only_agents"
+                        value=max_read_only_agents
+                    />
                     <label class="checkbox-row" for="project-auto-commit">
                         <input
                             id="project-auto-commit"

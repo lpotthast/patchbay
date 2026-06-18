@@ -570,6 +570,7 @@ async fn compact_memory_events(
 struct UpdateSettingsForm {
     workspace_mode: String,
     max_code_edit_agents: i64,
+    max_read_only_agents: Option<i64>,
     create_pr: Option<String>,
     auto_commit: Option<String>,
     commit_standard: Option<String>,
@@ -636,6 +637,7 @@ async fn update_settings(
         UpdateProjectSettings {
             workspace_mode: Some(workspace_mode),
             max_code_edit_agents: Some(form.max_code_edit_agents),
+            max_read_only_agents: form.max_read_only_agents,
             create_pr: Some(form.create_pr.is_some()),
             auto_commit: parse_optional_checkbox(form.auto_commit),
             commit_standard: form.commit_standard,
@@ -700,6 +702,7 @@ fn is_background_form_request(headers: &HeaderMap) -> bool {
 
 #[derive(serde::Deserialize)]
 struct UpdateCommitPolicyForm {
+    max_read_only_agents: Option<i64>,
     auto_commit: Option<String>,
     commit_standard: Option<String>,
     revert_strategy: String,
@@ -734,6 +737,7 @@ async fn update_commit_policy(
         &state.store,
         &project,
         UpdateProjectSettings {
+            max_read_only_agents: form.max_read_only_agents,
             auto_commit: Some(form.auto_commit.is_some()),
             commit_standard: form.commit_standard,
             revert_strategy: Some(revert_strategy),
@@ -884,6 +888,7 @@ struct StartAutomationForm {
     tool: Option<String>,
     item_id: Option<i64>,
     prompt: Option<String>,
+    mutability: Option<String>,
 }
 
 async fn start_automation(
@@ -901,9 +906,20 @@ async fn start_automation(
     let is_one_shot = tool.is_some()
         || form.item_id.is_some()
         || form
+            .mutability
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || form
             .prompt
             .as_ref()
             .is_some_and(|value| !value.trim().is_empty());
+    let mutability = match form.mutability.filter(|value| !value.trim().is_empty()) {
+        Some(value) => match value.parse() {
+            Ok(value) => Some(value),
+            Err(err) => return error_response(err).await,
+        },
+        None => None,
+    };
 
     let result = if is_one_shot {
         automation::start_one_automation_run_in_background(
@@ -914,6 +930,7 @@ async fn start_automation(
                 work_item_id: form.item_id,
                 work_item_selector: None,
                 extra_prompt: form.prompt.filter(|value| !value.trim().is_empty()),
+                mutability,
                 trigger: None,
             },
             Some(state.sessions.clone()),
@@ -1002,6 +1019,8 @@ struct CreateAutomationTriggerForm {
     #[serde(default = "default_automation_schedule")]
     schedule: String,
     tool: Option<String>,
+    #[serde(default = "default_automation_mutability")]
+    mutability: String,
     work_item_selector: Option<String>,
     priority: Option<i64>,
     prompt: Option<String>,
@@ -1032,6 +1051,10 @@ async fn create_automation_trigger(
             Ok(selector) => selector,
             Err(err) => return error_response(err).await,
         };
+    let mutability = match form.mutability.parse() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
     match automation_triggers::create_trigger(
         &state.store,
         &project,
@@ -1042,6 +1065,7 @@ async fn create_automation_trigger(
             effect,
             schedule: form.schedule,
             tool_name,
+            mutability,
             prompt: form.prompt.unwrap_or_default(),
             work_item_selector,
             priority: form.priority.unwrap_or_default(),
@@ -1077,6 +1101,8 @@ struct UpdateAutomationTriggerForm {
     effect: String,
     #[serde(default = "default_automation_schedule")]
     schedule: String,
+    #[serde(default = "default_automation_mutability")]
+    mutability: String,
     enabled: Option<String>,
     work_item_selector: Option<String>,
     priority: Option<i64>,
@@ -1101,6 +1127,10 @@ async fn update_automation_trigger(
             Ok(selector) => selector,
             Err(err) => return error_response(err).await,
         };
+    let mutability = match form.mutability.parse() {
+        Ok(value) => value,
+        Err(err) => return error_response(err).await,
+    };
     match automation_triggers::update_trigger(
         &state.store,
         &project,
@@ -1111,6 +1141,7 @@ async fn update_automation_trigger(
             activation,
             effect,
             schedule: form.schedule,
+            mutability,
             prompt: form.prompt.unwrap_or_default(),
             work_item_selector,
             priority: form.priority,
@@ -1150,6 +1181,12 @@ fn default_automation_effect() -> String {
 
 fn default_automation_schedule() -> String {
     "@every 15s".to_owned()
+}
+
+fn default_automation_mutability() -> String {
+    patchbay_types::AutomationRunMutability::Mutating
+        .as_storage()
+        .to_owned()
 }
 
 #[derive(serde::Deserialize)]

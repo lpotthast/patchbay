@@ -22,8 +22,8 @@ use crate::{
     },
     shared::view_models::{
         AgentReasoningEffort, AgentSandboxMode, AgentToolName, AutomationActivation,
-        AutomationEffect, CodexAgentModel, DEFAULT_STATE_LABEL, RevertStrategy, STATE_LABEL_KEY,
-        WorkspaceMode, WorktreeCleanupPolicy,
+        AutomationEffect, AutomationRunMutability, CodexAgentModel, DEFAULT_STATE_LABEL,
+        RevertStrategy, STATE_LABEL_KEY, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -255,6 +255,7 @@ impl CrudLifetime<CrudProjectResource> for ProjectLifetime {
         projects::validate_settings(
             workspace_mode,
             update_model.max_code_edit_agents,
+            update_model.max_read_only_agents,
             update_model.create_pr,
             update_model.stale_claim_minutes,
             update_model.default_agent_model.as_deref(),
@@ -882,6 +883,9 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
             normalize_required_schedule(std::mem::take(&mut create_model.schedule))?;
         let activation = parse_activation(&create_model.activation)?;
         let effect = parse_effect(&create_model.effect)?;
+        create_model.mutability = parse_mutability(&create_model.mutability)?
+            .as_storage()
+            .to_owned();
         create_model.work_item_selector =
             normalize_selector_storage(activation, create_model.work_item_selector.take())?;
         let selector = parse_work_item_selector(create_model.work_item_selector.as_deref())?;
@@ -930,6 +934,9 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         let previous_activation = parse_activation(&existing.activation)?;
         let activation = parse_activation(&update_model.activation)?;
         let effect = parse_effect(&update_model.effect)?;
+        update_model.mutability = parse_mutability(&update_model.mutability)?
+            .as_storage()
+            .to_owned();
         update_model.work_item_selector =
             normalize_selector_storage(activation, update_model.work_item_selector.take())?;
         let selector = parse_work_item_selector(update_model.work_item_selector.as_deref())?;
@@ -1063,6 +1070,14 @@ fn parse_activation(
 fn parse_effect(value: &str) -> Result<AutomationEffect, HookError<AutomationTriggerHookError>> {
     value
         .parse::<AutomationEffect>()
+        .map_err(|err| trigger_unprocessable_error(err.to_string()))
+}
+
+fn parse_mutability(
+    value: &str,
+) -> Result<AutomationRunMutability, HookError<AutomationTriggerHookError>> {
+    value
+        .parse::<AutomationRunMutability>()
         .map_err(|err| trigger_unprocessable_error(err.to_string()))
 }
 

@@ -9,6 +9,10 @@ pub type AutomationTriggerModel = Model;
 pub type AutomationTriggerActiveModel = ActiveModel;
 pub type AutomationTriggerId = ModelId;
 
+fn default_mutability_storage() -> String {
+    "mutating".to_owned()
+}
+
 #[derive(
     Clone,
     Debug,
@@ -49,6 +53,9 @@ pub struct Model {
     pub schedule: String,
 
     pub tool_name: String,
+
+    #[serde(default = "default_mutability_storage")]
+    pub mutability: String,
 
     pub prompt: String,
 

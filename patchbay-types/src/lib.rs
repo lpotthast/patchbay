@@ -102,6 +102,7 @@ pub struct ProjectView {
     pub memory: String,
     pub workspace_mode: WorkspaceMode,
     pub max_code_edit_agents: i64,
+    pub max_read_only_agents: i64,
     pub create_pr: bool,
     pub auto_commit: bool,
     pub commit_standard: String,
@@ -577,6 +578,7 @@ pub struct ProjectSettingsView {
     pub project_id: i64,
     pub workspace_mode: WorkspaceMode,
     pub max_code_edit_agents: i64,
+    pub max_read_only_agents: i64,
     pub create_pr: bool,
     pub auto_commit: bool,
     pub commit_standard: String,
@@ -920,6 +922,46 @@ impl FromStr for AgentRunStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AutomationRunMutability {
+    Mutating,
+    ReadOnly,
+}
+
+impl AutomationRunMutability {
+    pub fn as_storage(self) -> &'static str {
+        match self {
+            Self::Mutating => "mutating",
+            Self::ReadOnly => "read_only",
+        }
+    }
+
+    pub fn all() -> [Self; 2] {
+        [Self::Mutating, Self::ReadOnly]
+    }
+}
+
+impl fmt::Display for AutomationRunMutability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_storage())
+    }
+}
+
+impl FromStr for AutomationRunMutability {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().replace('-', "_").as_str() {
+            "mutating" | "mutable" => Ok(Self::Mutating),
+            "read_only" | "readonly" => Ok(Self::ReadOnly),
+            _ => Err(ParseEnumError(
+                "automation run mutability must be one of: mutating, read_only",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentCommitOutcome {
     NotEvaluated,
     NotRequired,
@@ -978,6 +1020,7 @@ pub struct AgentRunView {
     pub trigger_id: Option<i64>,
     pub trigger_name: Option<String>,
     pub tool_name: AgentToolName,
+    pub mutability: AutomationRunMutability,
     pub status: AgentRunStatus,
     pub command: String,
     pub working_dir: String,
@@ -1084,6 +1127,9 @@ pub struct AutomationStatusView {
     pub project: String,
     pub settings: ProjectSettingsView,
     pub running_runs: i64,
+    pub running_mutating_runs: i64,
+    pub running_read_only_runs: i64,
+    pub allowed_mutating_runs: i64,
     pub recent_runs: Vec<AgentRunView>,
     pub tools: Vec<AgentToolView>,
 }
@@ -1177,6 +1223,7 @@ pub struct AutomationTriggerView {
     pub effect: AutomationEffect,
     pub schedule: String,
     pub tool_name: AgentToolName,
+    pub mutability: AutomationRunMutability,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
     pub priority: i64,
@@ -1310,4 +1357,27 @@ pub struct AddCommentRequest {
     pub author_type: AuthorType,
     pub author_name: Option<String>,
     pub body: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_run_mutability_parses_displays_and_serializes() {
+        assert_eq!(
+            "mutating".parse::<AutomationRunMutability>().unwrap(),
+            AutomationRunMutability::Mutating
+        );
+        assert_eq!(
+            "read-only".parse::<AutomationRunMutability>().unwrap(),
+            AutomationRunMutability::ReadOnly
+        );
+        assert_eq!(AutomationRunMutability::ReadOnly.to_string(), "read_only");
+        assert_eq!(
+            serde_json::to_string(&AutomationRunMutability::ReadOnly).unwrap(),
+            r#""read_only""#
+        );
+        assert!("readonly-ish".parse::<AutomationRunMutability>().is_err());
+    }
 }

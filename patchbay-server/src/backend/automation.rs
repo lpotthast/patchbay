@@ -20,8 +20,8 @@ use git2::{
 };
 use rootcause::{Result, prelude::*};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect,
 };
 use tokio::{sync::watch, time::timeout};
 
@@ -35,13 +35,13 @@ use crate::{
         storage::{Store, utc_now},
     },
     shared::view_models::{
-        AUTOMATION_BLOCKED_LABEL_KEY, AgentCommitOutcome, AgentGitRuntimePolicy,
-        AgentReasoningEffort, AgentRunOutputKind, AgentRunOutputLog, AgentRunOutputPiece,
-        AgentRunStatus, AgentRunTokenUsageView, AgentRunView, AgentSandboxMode, AgentToolName,
-        AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL,
-        FEEDBACK_REQUESTED_LABEL_KEY, FINISHED_STATE_LABEL, ProjectMemoryEventRefView,
-        ProjectSettingsView, RecoveredClaimView, RevertStrategy, RunLogView, WorkItemView,
-        WorkspaceMode, WorktreeCleanupPolicy,
+        AUTOMATION_BLOCKED_LABEL_KEY, AgentCommitOutcome, AgentGitHardResetPolicy,
+        AgentGitRuntimePolicy, AgentReasoningEffort, AgentRunOutputKind, AgentRunOutputLog,
+        AgentRunOutputPiece, AgentRunStatus, AgentRunTokenUsageView, AgentRunView,
+        AgentSandboxMode, AgentToolName, AutomationRunMutability, AutomationStatusView,
+        CLAIMED_FROM_STATE_LABEL_KEY, DEFAULT_STATE_LABEL, FEEDBACK_REQUESTED_LABEL_KEY,
+        FINISHED_STATE_LABEL, ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView,
+        RevertStrategy, RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -63,6 +63,7 @@ pub struct StartAutomation {
     pub work_item_id: Option<i64>,
     pub work_item_selector: Option<Condition>,
     pub extra_prompt: Option<String>,
+    pub mutability: Option<AutomationRunMutability>,
     pub trigger: Option<AutomationTriggerOrigin>,
 }
 
@@ -104,6 +105,7 @@ struct PromptContext<'a> {
     item: Option<&'a WorkItemView>,
     agent_id: &'a str,
     extra_prompt: Option<&'a str>,
+    mutability: AutomationRunMutability,
     workspace_mode: WorkspaceMode,
     auto_commit: bool,
     commit_standard: &'a str,
@@ -137,6 +139,7 @@ struct AgentProcessStart {
     agent_reasoning_effort: Option<AgentReasoningEffort>,
     agent_sandbox_mode: AgentSandboxMode,
     agent_extra_writable_roots: Vec<String>,
+    mutability: AutomationRunMutability,
 }
 
 struct OutputPieceDraft {
@@ -224,6 +227,25 @@ struct StartedAutomationRun {
     run: AgentRunModel,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RunningRunCounts {
+    pub mutating: i64,
+    pub read_only: i64,
+}
+
+impl RunningRunCounts {
+    fn total(self) -> i64 {
+        self.mutating.saturating_add(self.read_only)
+    }
+
+    fn for_mutability(self, mutability: AutomationRunMutability) -> i64 {
+        match mutability {
+            AutomationRunMutability::Mutating => self.mutating,
+            AutomationRunMutability::ReadOnly => self.read_only,
+        }
+    }
+}
+
 pub(crate) fn set_server_api_url(url: String) {
     let _ = SERVER_API_URL.set(url);
 }
@@ -308,6 +330,16 @@ fn ensure_patchbay_cli_path(path: PathBuf) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn ensure_tool_supports_mutability(
+    tool: AgentToolName,
+    mutability: AutomationRunMutability,
+) -> Result<()> {
+    match (tool, mutability) {
+        (AgentToolName::Codex, AutomationRunMutability::Mutating)
+        | (AgentToolName::Codex, AutomationRunMutability::ReadOnly) => Ok(()),
+    }
+}
+
 pub async fn start_automation_with_sessions_until(
     store: &Store,
     project_name: &str,
@@ -366,10 +398,13 @@ async fn begin_automation_run(
 ) -> Result<StartedAutomationRun> {
     let project = projects::get_project(store, project_name).await?;
     let settings = projects::get_settings(store, project_name).await?;
-    enforce_concurrency(store, project_name, &settings).await?;
-
+    let mutability = start
+        .mutability
+        .unwrap_or(AutomationRunMutability::Mutating);
     let tool = start.tool.unwrap_or(settings.default_agent_tool);
-    let run = create_run(store, project.id, tool, start.trigger.as_ref()).await?;
+    ensure_tool_supports_mutability(tool, mutability)?;
+    enforce_concurrency(store, project_name, &settings, mutability).await?;
+    let run = create_run(store, project.id, tool, mutability, start.trigger.as_ref()).await?;
 
     Ok(StartedAutomationRun {
         project_name: project_name.to_owned(),
@@ -396,6 +431,7 @@ async fn complete_started_automation_run(
         mut run,
     } = started;
     let agent_id = format!("patchbay-run-{}", run.id);
+    let run_mutability = AutomationRunMutability::from_str(&run.mutability)?;
 
     if cancellation_requested(&cancellation) {
         return cancel_run(
@@ -545,11 +581,12 @@ async fn complete_started_automation_run(
         .await;
     }
 
-    let workspace = match prepare_workspace(
+    let workspace = match prepare_workspace_for_run(
         run.id,
         &project_name,
         &project_path,
         settings.workspace_mode,
+        run_mutability,
     ) {
         Ok(workspace) => workspace,
         Err(err) => {
@@ -618,7 +655,13 @@ async fn complete_started_automation_run(
             .await;
         }
     };
-    let git_runtime = match prepare_git_runtime(run.id, &log_dir, &patchbay_binary, &settings) {
+    let git_runtime = match prepare_git_runtime(
+        run.id,
+        &log_dir,
+        &patchbay_binary,
+        &settings,
+        run_mutability,
+    ) {
         Ok(git_runtime) => git_runtime,
         Err(err) => {
             return fail_run_after_claim(
@@ -654,6 +697,7 @@ async fn complete_started_automation_run(
         item: claimed_item.as_ref(),
         agent_id: &agent_id,
         extra_prompt: start.extra_prompt.as_deref(),
+        mutability: run_mutability,
         workspace_mode: settings.workspace_mode,
         auto_commit: settings.auto_commit,
         commit_standard: &settings.commit_standard,
@@ -693,8 +737,8 @@ async fn complete_started_automation_run(
             memory_event_id,
             agent_model: agent_model.clone(),
             agent_reasoning_effort,
-            commit_required: commit_required_for_policy(&settings),
-            pr_requested: settings.create_pr,
+            commit_required: commit_required_for_run(&settings, run_mutability),
+            pr_requested: pr_requested_for_run(&settings, run_mutability),
         },
     )
     .await
@@ -715,7 +759,7 @@ async fn complete_started_automation_run(
 
     let commit_baseline = capture_commit_baseline(
         Path::new(&run.working_dir),
-        commit_required_for_policy(&settings),
+        commit_required_for_run(&settings, run_mutability),
     );
     let output = run_agent_process(
         AgentProcessStart {
@@ -736,6 +780,7 @@ async fn complete_started_automation_run(
             agent_reasoning_effort,
             agent_sandbox_mode: settings.agent_sandbox_mode,
             agent_extra_writable_roots: settings.agent_extra_writable_roots.clone(),
+            mutability: run_mutability,
         },
         sessions,
         cancellation,
@@ -757,8 +802,11 @@ async fn complete_started_automation_run(
             } else {
                 "Codex app-server turn completed successfully with a final response".to_owned()
             };
-            let commit_evaluation =
-                evaluate_commit_outcome(Path::new(&run.working_dir), &commit_baseline);
+            let commit_evaluation = evaluate_commit_outcome_for_run(
+                Path::new(&run.working_dir),
+                &commit_baseline,
+                run_mutability,
+            );
             run = update_run_commit_outcome(store, run, &commit_evaluation).await?;
             if commit_evaluation.validation_failed {
                 success = false;
@@ -770,7 +818,7 @@ async fn complete_started_automation_run(
                         .unwrap_or("no new commit was created")
                 );
             }
-            if success && settings.create_pr {
+            if success && pr_requested_for_run(&settings, run_mutability) {
                 match create_pull_request(Path::new(&run.working_dir)).await {
                     Ok(pr_url) => {
                         result_summary = format!(
@@ -842,8 +890,11 @@ async fn complete_started_automation_run(
             write_run_output_log(&log_path, &output).context_with(|| {
                 format!("failed to write automation log {}", log_path.display())
             })?;
-            let commit_evaluation =
-                evaluate_commit_outcome(Path::new(&run.working_dir), &commit_baseline);
+            let commit_evaluation = evaluate_commit_outcome_for_run(
+                Path::new(&run.working_dir),
+                &commit_baseline,
+                run_mutability,
+            );
             run = update_run_commit_outcome(store, run, &commit_evaluation).await?;
             release_claim_if_needed(
                 store,
@@ -989,14 +1040,17 @@ pub async fn stop_automation(store: &Store, project_name: &str) -> Result<Vec<Ag
 
 pub async fn automation_status(store: &Store, project_name: &str) -> Result<AutomationStatusView> {
     let settings = projects::get_settings(store, project_name).await?;
-    let running_runs = running_run_count(store, project_name).await?;
+    let running_counts = running_run_counts(store, project_name).await?;
     let recent_runs = list_runs(store, project_name, Some(10)).await?;
     let tools = agent_tools::list_tools(store).await?;
 
     Ok(AutomationStatusView {
         project: project_name.to_owned(),
+        allowed_mutating_runs: projects::allowed_code_edit_agents(&settings),
         settings,
-        running_runs,
+        running_runs: running_counts.total(),
+        running_mutating_runs: running_counts.mutating,
+        running_read_only_runs: running_counts.read_only,
         recent_runs,
         tools,
     })
@@ -1006,7 +1060,7 @@ pub async fn active_project_names(store: &Store) -> Result<Vec<String>> {
     let projects = projects::list_projects(store).await?;
     let mut active = Vec::new();
     for project in projects {
-        if running_run_count(store, &project.name).await? > 0 {
+        if running_run_counts(store, &project.name).await?.total() > 0 {
             active.push(project.name);
         }
     }
@@ -1215,40 +1269,81 @@ async fn enforce_concurrency(
     store: &Store,
     project_name: &str,
     settings: &ProjectSettingsView,
+    mutability: AutomationRunMutability,
 ) -> Result<()> {
-    if settings.create_pr && settings.workspace_mode == WorkspaceMode::CurrentBranch {
+    if mutability == AutomationRunMutability::Mutating
+        && settings.create_pr
+        && settings.workspace_mode == WorkspaceMode::CurrentBranch
+    {
         bail!("pull requests can only be created for git_worktree or git_branch strategies");
     }
-    let allowed = projects::allowed_code_edit_agents(settings);
-    let running = running_run_count(store, project_name).await?;
+    let allowed = allowed_runs_for_mutability(settings, mutability);
+    let running = running_run_counts(store, project_name)
+        .await?
+        .for_mutability(mutability);
     if running >= allowed {
-        bail!("project already has {running} running agent run(s); limit is {allowed}");
+        match mutability {
+            AutomationRunMutability::Mutating => {
+                bail!(
+                    "project already has {running} running mutating agent run(s); limit is {allowed}"
+                );
+            }
+            AutomationRunMutability::ReadOnly => {
+                bail!(
+                    "project already has {running} running read-only agent run(s); limit is {allowed}"
+                );
+            }
+        }
     }
     Ok(())
 }
 
-pub async fn can_start_automation_run(store: &Store, project_name: &str) -> Result<bool> {
+pub async fn can_start_automation_run(
+    store: &Store,
+    project_name: &str,
+    mutability: AutomationRunMutability,
+) -> Result<bool> {
     let settings = projects::get_settings(store, project_name).await?;
-    let allowed = projects::allowed_code_edit_agents(&settings);
-    let running = running_run_count(store, project_name).await?;
+    let allowed = allowed_runs_for_mutability(&settings, mutability);
+    let running = running_run_counts(store, project_name)
+        .await?
+        .for_mutability(mutability);
     Ok(running < allowed)
 }
 
-async fn running_run_count(store: &Store, project_name: &str) -> Result<i64> {
+fn allowed_runs_for_mutability(
+    settings: &ProjectSettingsView,
+    mutability: AutomationRunMutability,
+) -> i64 {
+    match mutability {
+        AutomationRunMutability::Mutating => projects::allowed_code_edit_agents(settings),
+        AutomationRunMutability::ReadOnly => settings.max_read_only_agents,
+    }
+}
+
+async fn running_run_counts(store: &Store, project_name: &str) -> Result<RunningRunCounts> {
     let project_id = projects::project_id(store, project_name).await?;
-    let count = AgentRun::find()
+    let runs = AgentRun::find()
         .filter(agent_run::Column::ProjectId.eq(project_id))
         .filter(agent_run::Column::Status.eq(AgentRunStatus::Running.as_storage()))
-        .count(store.db().as_ref())
+        .all(store.db().as_ref())
         .await
-        .context("failed to count running agent runs")?;
-    Ok(count as i64)
+        .context("failed to load running agent runs")?;
+    let mut counts = RunningRunCounts::default();
+    for run in runs {
+        match AutomationRunMutability::from_str(&run.mutability)? {
+            AutomationRunMutability::Mutating => counts.mutating += 1,
+            AutomationRunMutability::ReadOnly => counts.read_only += 1,
+        }
+    }
+    Ok(counts)
 }
 
 async fn create_run(
     store: &Store,
     project_id: i64,
     tool: AgentToolName,
+    mutability: AutomationRunMutability,
     trigger: Option<&AutomationTriggerOrigin>,
 ) -> Result<AgentRunModel> {
     let now = utc_now();
@@ -1259,6 +1354,7 @@ async fn create_run(
         trigger_id: Set(trigger.map(|trigger| trigger.trigger_id)),
         trigger_name: Set(trigger.map(|trigger| trigger.trigger_name.clone())),
         tool_name: Set(tool.as_storage().to_owned()),
+        mutability: Set(mutability.as_storage().to_owned()),
         status: Set(AgentRunStatus::Running.as_storage().to_owned()),
         command: Set(String::new()),
         working_dir: Set(String::new()),
@@ -1436,6 +1532,30 @@ async fn publish_run_model_event(store: &Store, run: &AgentRunModel) {
     }
 }
 
+fn prepare_workspace_for_run(
+    run_id: i64,
+    project_name: &str,
+    project_path: &Path,
+    workspace_mode: WorkspaceMode,
+    mutability: AutomationRunMutability,
+) -> Result<WorkspacePlan> {
+    if mutability == AutomationRunMutability::ReadOnly {
+        return prepare_read_only_workspace(project_path);
+    }
+    prepare_workspace(run_id, project_name, project_path, workspace_mode)
+}
+
+fn prepare_read_only_workspace(project_path: &Path) -> Result<WorkspacePlan> {
+    if !project_path.is_dir() {
+        bail!("path '{}' is not a directory", project_path.display());
+    }
+    Ok(WorkspacePlan {
+        working_dir: project_path.to_path_buf(),
+        worktree_path: None,
+        branch_name: None,
+    })
+}
+
 fn prepare_workspace(
     run_id: i64,
     project_name: &str,
@@ -1560,11 +1680,44 @@ fn commit_required_for_policy(settings: &ProjectSettingsView) -> bool {
     }
 }
 
+fn commit_required_for_run(
+    settings: &ProjectSettingsView,
+    mutability: AutomationRunMutability,
+) -> bool {
+    match mutability {
+        AutomationRunMutability::Mutating => commit_required_for_policy(settings),
+        AutomationRunMutability::ReadOnly => false,
+    }
+}
+
+fn pr_requested_for_run(
+    settings: &ProjectSettingsView,
+    mutability: AutomationRunMutability,
+) -> bool {
+    mutability == AutomationRunMutability::Mutating && settings.create_pr
+}
+
 fn capture_commit_baseline(path: &Path, required: bool) -> CommitBaseline {
     CommitBaseline {
         required,
         inspection: inspect_git_workspace(path).map_err(|err| format!("{err:#}")),
     }
+}
+
+fn evaluate_commit_outcome_for_run(
+    path: &Path,
+    baseline: &CommitBaseline,
+    mutability: AutomationRunMutability,
+) -> CommitOutcomeEvaluation {
+    if mutability == AutomationRunMutability::ReadOnly {
+        return CommitOutcomeEvaluation {
+            outcome: AgentCommitOutcome::NotRequired,
+            shas: Vec::new(),
+            detail: Some("commit is not required for read-only automation".to_owned()),
+            validation_failed: false,
+        };
+    }
+    evaluate_commit_outcome(path, baseline)
 }
 
 fn evaluate_commit_outcome(path: &Path, baseline: &CommitBaseline) -> CommitOutcomeEvaluation {
@@ -1817,15 +1970,13 @@ fn prepare_git_runtime(
     log_dir: &Path,
     patchbay_binary: &Path,
     settings: &ProjectSettingsView,
+    mutability: AutomationRunMutability,
 ) -> Result<GitRuntimeFiles> {
     let shim_dir = log_dir.join(format!("run-{run_id}-bin"));
     fs::create_dir_all(&shim_dir)
         .context_with(|| format!("failed to create git shim dir {}", shim_dir.display()))?;
     let policy_path = log_dir.join(format!("run-{run_id}.git-policy.json"));
-    let runtime_policy = AgentGitRuntimePolicy {
-        policy: settings.agent_git_command_policy.clone(),
-        workspace_mode: settings.workspace_mode,
-    };
+    let runtime_policy = git_runtime_policy_for_run(settings, mutability);
     let policy_json = serde_json::to_string_pretty(&runtime_policy)
         .context("failed to encode git runtime policy")?;
     fs::write(&policy_path, policy_json)
@@ -1844,6 +1995,32 @@ fn prepare_git_runtime(
         shim_dir,
         policy_path,
     })
+}
+
+fn git_runtime_policy_for_run(
+    settings: &ProjectSettingsView,
+    mutability: AutomationRunMutability,
+) -> AgentGitRuntimePolicy {
+    match mutability {
+        AutomationRunMutability::Mutating => AgentGitRuntimePolicy {
+            policy: settings.agent_git_command_policy.clone(),
+            workspace_mode: settings.workspace_mode,
+        },
+        AutomationRunMutability::ReadOnly => AgentGitRuntimePolicy {
+            policy: read_only_git_command_policy(),
+            workspace_mode: WorkspaceMode::CurrentBranch,
+        },
+    }
+}
+
+fn read_only_git_command_policy() -> patchbay_types::AgentGitCommandPolicy {
+    patchbay_types::AgentGitCommandPolicy {
+        add: false,
+        commit: false,
+        push: false,
+        reset: false,
+        hard_reset: AgentGitHardResetPolicy::Never,
+    }
 }
 
 fn resolve_real_git_path() -> Result<PathBuf> {
@@ -1937,6 +2114,16 @@ fn agent_sandbox_mode(mode: AgentSandboxMode) -> SandboxMode {
     }
 }
 
+fn agent_sandbox_mode_for_run(
+    mutability: AutomationRunMutability,
+    mode: AgentSandboxMode,
+) -> SandboxMode {
+    match mutability {
+        AutomationRunMutability::Mutating => agent_sandbox_mode(mode),
+        AutomationRunMutability::ReadOnly => SandboxMode::ReadOnly,
+    }
+}
+
 fn agent_sandbox_policy(
     mode: AgentSandboxMode,
     agent_extra_writable_roots: &[String],
@@ -1949,6 +2136,20 @@ fn agent_sandbox_policy(
         }),
         AgentSandboxMode::DangerFullAccess => serde_json::json!({
             "type": "dangerFullAccess",
+        }),
+    }
+}
+
+fn agent_sandbox_policy_for_run(
+    mutability: AutomationRunMutability,
+    mode: AgentSandboxMode,
+    agent_extra_writable_roots: &[String],
+) -> serde_json::Value {
+    match mutability {
+        AutomationRunMutability::Mutating => agent_sandbox_policy(mode, agent_extra_writable_roots),
+        AutomationRunMutability::ReadOnly => serde_json::json!({
+            "type": "readOnly",
+            "networkAccess": true,
         }),
     }
 }
@@ -2115,10 +2316,14 @@ async fn run_codex_app_server_turn(
     .await?;
     let mut thread_options = ThreadOptions::builder()
         .working_directory(working_dir)
-        .sandbox_mode(agent_sandbox_mode(start.agent_sandbox_mode))
+        .sandbox_mode(agent_sandbox_mode_for_run(
+            start.mutability,
+            start.agent_sandbox_mode,
+        ))
         .approval_policy(ApprovalMode::Never)
         .network_access_enabled(true)
-        .sandbox_policy(agent_sandbox_policy(
+        .sandbox_policy(agent_sandbox_policy_for_run(
+            start.mutability,
             start.agent_sandbox_mode,
             &start.agent_extra_writable_roots,
         ))
@@ -2415,65 +2620,86 @@ fn build_prompt(context: PromptContext<'_>) -> String {
         ));
     }
     prompt.push_str("## Git Commit And Revert Policy\n\n");
-    prompt.push_str(&format!("Workspace mode: {}\n", context.workspace_mode));
-    match context.workspace_mode {
-        WorkspaceMode::CurrentBranch => {
-            prompt.push_str(&format!(
-                "Auto-commit: {}\n",
-                if context.auto_commit { "on" } else { "off" }
-            ));
-            prompt.push_str(&format!(
-                "Failure revert strategy: {}\n\n",
-                context.revert_strategy
-            ));
-            prompt.push_str(
-                "- At the start of work, inspect `git status --short` so you can distinguish pre-existing changes from your own changes.\n",
-            );
-            if context.auto_commit {
+    prompt.push_str(&format!("Run mutability: {}\n", context.mutability));
+    if context.mutability == AutomationRunMutability::ReadOnly {
+        prompt.push_str("Workspace mode: read_only project checkout\n");
+        prompt.push_str("Commit required: no\n");
+        prompt.push_str("Pull request required: no\n\n");
+        prompt.push_str(
+            "- This run is read-only with respect to the project checkout. Do not edit project files, create or remove files under the workspace, change Git index or refs, create commits, push, reset, create branches/worktrees, or open pull requests.\n",
+        );
+        prompt.push_str(
+            "- Patchbay metadata writes requested by the trigger are still allowed through the `patchbay` CLI/API, including item updates, labels, comments, progress, release state, and project memory.\n",
+        );
+        prompt.push_str(
+            "- No commit is required. Report sandbox or Git blockers instead of working around read-only restrictions.\n",
+        );
+    } else {
+        prompt.push_str(&format!("Workspace mode: {}\n", context.workspace_mode));
+        match context.workspace_mode {
+            WorkspaceMode::CurrentBranch => {
+                prompt.push_str(&format!(
+                    "Auto-commit: {}\n",
+                    if context.auto_commit { "on" } else { "off" }
+                ));
+                prompt.push_str(&format!(
+                    "Failure revert strategy: {}\n\n",
+                    context.revert_strategy
+                ));
                 prompt.push_str(
-                    "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish` or otherwise ending a successful prompt-directed run.\n",
+                    "- At the start of work, inspect `git status --short` so you can distinguish pre-existing changes from your own changes.\n",
+                );
+                if context.auto_commit {
+                    prompt.push_str(
+                        "- After completed work and verification, inspect the diff, stage only the changes for this work item, and create a git commit before calling `patchbay item finish` or otherwise ending a successful prompt-directed run.\n",
+                    );
+                    prompt.push_str(
+                        "- Generate the commit message from the completed diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
+                    );
+                    prompt.push_str(
+                        "- If the project is not a git repository or there are no file changes to commit, say that in the finish report or final response instead of inventing a commit.\n",
+                    );
+                } else {
+                    prompt.push_str(
+                        "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report or final response.\n",
+                    );
+                }
+                prompt.push_str(&format!(
+                    "- If the work cannot be completed, revert all changes you made using the `{}` strategy before calling `patchbay item release --comment ...`.\n",
+                    context.revert_strategy
+                ));
+                prompt.push_str(current_branch_revert_instruction(context.revert_strategy));
+            }
+            WorkspaceMode::GitBranch | WorkspaceMode::GitWorktree => {
+                prompt.push_str(
+                    "Auto-commit: always on for this workspace mode\nFailure revert strategy: not applicable\n\n",
                 );
                 prompt.push_str(
-                    "- Generate the commit message from the completed diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
+                    "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish` or otherwise ending a successful prompt-directed run.\n",
                 );
                 prompt.push_str(
-                    "- If the project is not a git repository or there are no file changes to commit, say that in the finish report or final response instead of inventing a commit.\n",
+                    "- If the work cannot be completed, do not revert partial changes solely because the work is incomplete. Commit the useful partial work and then call `patchbay item release --comment ...` with what you tried and what remains.\n",
                 );
-            } else {
                 prompt.push_str(
-                    "- Do not create a git commit solely for Patchbay after completed work; leave completed changes in the current branch and describe them in the finish report or final response.\n",
+                    "- If there are no file changes to commit, explain that in the finish or release report.\n",
+                );
+                prompt.push_str(
+                    "- Generate commit messages from the diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
                 );
             }
-            prompt.push_str(&format!(
-                "- If the work cannot be completed, revert all changes you made using the `{}` strategy before calling `patchbay item release --comment ...`.\n",
-                context.revert_strategy
-            ));
-            prompt.push_str(current_branch_revert_instruction(context.revert_strategy));
-        }
-        WorkspaceMode::GitBranch | WorkspaceMode::GitWorktree => {
-            prompt.push_str(
-                "Auto-commit: always on for this workspace mode\nFailure revert strategy: not applicable\n\n",
-            );
-            prompt.push_str(
-                "- After completed work and verification, inspect the diff, stage the changes for this work item, and create a git commit before calling `patchbay item finish` or otherwise ending a successful prompt-directed run.\n",
-            );
-            prompt.push_str(
-                "- If the work cannot be completed, do not revert partial changes solely because the work is incomplete. Commit the useful partial work and then call `patchbay item release --comment ...` with what you tried and what remains.\n",
-            );
-            prompt.push_str(
-                "- If there are no file changes to commit, explain that in the finish or release report.\n",
-            );
-            prompt.push_str(
-                "- Generate commit messages from the diff and requested behavior. Follow the commit standard below and the repository's existing history.\n",
-            );
         }
     }
     prompt.push('\n');
     prompt.push_str("## Available Git Commands\n\n");
-    prompt.push_str(&git_command_policy_prompt(
-        context.agent_git_command_policy,
-        context.workspace_mode,
-    ));
+    let git_policy = match context.mutability {
+        AutomationRunMutability::Mutating => (*context.agent_git_command_policy).clone(),
+        AutomationRunMutability::ReadOnly => read_only_git_command_policy(),
+    };
+    let git_workspace_mode = match context.mutability {
+        AutomationRunMutability::Mutating => context.workspace_mode,
+        AutomationRunMutability::ReadOnly => WorkspaceMode::CurrentBranch,
+    };
+    prompt.push_str(&git_command_policy_prompt(&git_policy, git_workspace_mode));
     prompt.push('\n');
     prompt.push_str("Commit standard:\n");
     if context.commit_standard.trim().is_empty() {
@@ -2492,7 +2718,7 @@ fn build_prompt(context: PromptContext<'_>) -> String {
         prompt.push_str(extra_prompt);
         prompt.push_str("\n\n");
     }
-    if context.create_pr {
+    if context.create_pr && context.mutability == AutomationRunMutability::Mutating {
         prompt.push_str(
             "## Pull Request\n\nCreate a pull request after the requested work is committed. \
              Patchbay will also attempt `gh pr create --fill` after your process exits.\n\n",
@@ -2530,7 +2756,7 @@ fn git_command_policy_prompt(
         }
     }
     if lines.is_empty() {
-        return "No mutable Git commands are configured for this project. If a Git command is blocked, report that blocker in your progress or final response.\n".to_owned();
+        return "No mutable Git commands are available for this run. If a Git command is blocked, report that blocker in your progress or final response.\n".to_owned();
     }
     lines.push(
         "- Other mutable Git commands may be blocked by Codex rules or the Patchbay git wrapper. If blocked, report the exact command and reason.",
@@ -3081,6 +3307,7 @@ fn model_to_view(run: AgentRunModel) -> Result<AgentRunView> {
         trigger_id: run.trigger_id,
         trigger_name: projects::normalize_optional(run.trigger_name),
         tool_name: AgentToolName::from_str(&run.tool_name)?,
+        mutability: AutomationRunMutability::from_str(&run.mutability)?,
         status: AgentRunStatus::from_str(&run.status)?,
         command: run.command,
         working_dir: run.working_dir,
@@ -3147,7 +3374,8 @@ mod tests {
     use crate::backend::{
         items::{CreateWorkItem, claim_item, create_item, get_item},
         projects::{
-            CreateProject, UpdateProjectSettings, create_project, get_project, update_settings,
+            CreateProject, UpdateProjectSettings, create_project, get_project, get_settings,
+            update_settings,
         },
     };
 
@@ -3234,6 +3462,24 @@ mod tests {
         fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
         let plan = prepare_workspace(1, "demo", temp.path(), WorkspaceMode::CurrentBranch).unwrap();
+
+        assert_eq!(plan.working_dir, temp.path());
+        assert!(plan.worktree_path.is_none());
+        assert!(plan.branch_name.is_none());
+    }
+
+    #[test]
+    fn read_only_workspace_uses_project_checkout_without_branch_or_worktree() {
+        let temp = TempDir::new().unwrap();
+
+        let plan = prepare_workspace_for_run(
+            1,
+            "demo",
+            temp.path(),
+            WorkspaceMode::GitWorktree,
+            AutomationRunMutability::ReadOnly,
+        )
+        .unwrap();
 
         assert_eq!(plan.working_dir, temp.path());
         assert!(plan.worktree_path.is_none());
@@ -3334,6 +3580,22 @@ mod tests {
     }
 
     #[test]
+    fn read_only_commit_outcome_is_not_required_without_git_validation() {
+        let temp = TempDir::new().unwrap();
+        let baseline = capture_commit_baseline(temp.path(), false);
+
+        let evaluation = evaluate_commit_outcome_for_run(
+            temp.path(),
+            &baseline,
+            AutomationRunMutability::ReadOnly,
+        );
+
+        assert_eq!(evaluation.outcome, AgentCommitOutcome::NotRequired);
+        assert!(evaluation.shas.is_empty());
+        assert!(!evaluation.validation_failed);
+    }
+
+    #[test]
     fn token_usage_reads_latest_run_output_metadata() {
         let pieces = vec![
             new_output_piece(
@@ -3383,9 +3645,15 @@ mod tests {
     async fn run_log_uses_active_session_output_when_available() {
         let (temp, store) = test_store().await;
         let project = get_project(&store, "demo").await.unwrap();
-        let run = create_run(&store, project.id, AgentToolName::Codex, None)
-            .await
-            .unwrap();
+        let run = create_run(
+            &store,
+            project.id,
+            AgentToolName::Codex,
+            AutomationRunMutability::Mutating,
+            None,
+        )
+        .await
+        .unwrap();
         let log_path = temp.path().join("run.output.json");
         write_run_output_log(
             &log_path,
@@ -3453,6 +3721,104 @@ mod tests {
         assert_eq!(run_log.output.len(), 1);
         assert_eq!(run_log.output[0].title, "active");
         assert_eq!(run_log.output[0].body, "active output");
+    }
+
+    #[tokio::test]
+    async fn mutating_and_read_only_runs_have_independent_admission_limits() {
+        let (_temp, store) = test_store().await;
+        let project = get_project(&store, "demo").await.unwrap();
+
+        let mutating = create_run(
+            &store,
+            project.id,
+            AgentToolName::Codex,
+            AutomationRunMutability::Mutating,
+            None,
+        )
+        .await
+        .unwrap();
+        let read_only = create_run(
+            &store,
+            project.id,
+            AgentToolName::Codex,
+            AutomationRunMutability::ReadOnly,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            model_to_view(mutating).unwrap().mutability,
+            AutomationRunMutability::Mutating
+        );
+        assert_eq!(
+            model_to_view(read_only).unwrap().mutability,
+            AutomationRunMutability::ReadOnly
+        );
+        assert!(
+            !can_start_automation_run(&store, "demo", AutomationRunMutability::Mutating)
+                .await
+                .unwrap()
+        );
+        let settings = get_settings(&store, "demo").await.unwrap();
+        let err = enforce_concurrency(&store, "demo", &settings, AutomationRunMutability::Mutating)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("mutating"));
+        assert!(err.to_string().contains("limit is 1"));
+        assert!(
+            can_start_automation_run(&store, "demo", AutomationRunMutability::ReadOnly)
+                .await
+                .unwrap()
+        );
+
+        let status = automation_status(&store, "demo").await.unwrap();
+        assert_eq!(status.running_runs, 2);
+        assert_eq!(status.running_mutating_runs, 1);
+        assert_eq!(status.running_read_only_runs, 1);
+        assert_eq!(status.allowed_mutating_runs, 1);
+        assert_eq!(status.settings.max_read_only_agents, 2);
+
+        create_run(
+            &store,
+            project.id,
+            AgentToolName::Codex,
+            AutomationRunMutability::ReadOnly,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !can_start_automation_run(&store, "demo", AutomationRunMutability::ReadOnly)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_admission_can_be_disabled_with_zero_limit() {
+        let (_temp, store) = test_store().await;
+        let settings = update_settings(
+            &store,
+            "demo",
+            UpdateProjectSettings {
+                max_read_only_agents: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !can_start_automation_run(&store, "demo", AutomationRunMutability::ReadOnly)
+                .await
+                .unwrap()
+        );
+        let err = enforce_concurrency(&store, "demo", &settings, AutomationRunMutability::ReadOnly)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("read-only"));
+        assert!(err.to_string().contains("limit is 0"));
     }
 
     #[tokio::test]
@@ -3540,6 +3906,7 @@ mod tests {
             item: Some(&item),
             agent_id: "patchbay-run-1",
             extra_prompt: None,
+            mutability: AutomationRunMutability::Mutating,
             workspace_mode: WorkspaceMode::CurrentBranch,
             auto_commit: true,
             commit_standard: "Use short imperative subjects.",
@@ -3615,6 +3982,7 @@ mod tests {
             item: None,
             agent_id: "patchbay-run-1",
             extra_prompt: None,
+            mutability: AutomationRunMutability::Mutating,
             workspace_mode: WorkspaceMode::GitWorktree,
             auto_commit: false,
             commit_standard: "",
@@ -3633,6 +4001,37 @@ mod tests {
         assert!(
             prompt.contains("not configured; infer the repository's existing commit message style")
         );
+    }
+
+    #[test]
+    fn read_only_prompt_disables_file_edits_commits_and_pull_requests() {
+        let prompt = build_prompt(PromptContext {
+            project_name: "demo",
+            system_prompt: "",
+            memory: "",
+            memory_event_id: None,
+            item: None,
+            agent_id: "patchbay-run-1",
+            extra_prompt: Some("Inspect the item and update labels."),
+            mutability: AutomationRunMutability::ReadOnly,
+            workspace_mode: WorkspaceMode::GitWorktree,
+            auto_commit: true,
+            commit_standard: "Use short subjects.",
+            revert_strategy: RevertStrategy::GitReset,
+            create_pr: true,
+            agent_git_command_policy: &Default::default(),
+        });
+
+        assert!(prompt.contains("Run mutability: read_only"));
+        assert!(prompt.contains("Do not edit project files"));
+        assert!(
+            prompt.contains("Patchbay metadata writes requested by the trigger are still allowed")
+        );
+        assert!(prompt.contains("No commit is required"));
+        assert!(prompt.contains("No mutable Git commands are available for this run"));
+        assert!(!prompt.contains("create a git commit before calling"));
+        assert!(!prompt.contains("Patchbay will also attempt `gh pr create --fill`"));
+        assert!(prompt.contains("Inspect the item and update labels."));
     }
 
     #[test]
@@ -3735,6 +4134,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_only_codex_thread_sandbox_ignores_project_writable_roots() {
+        let roots = vec!["/tmp/ignored-for-read-only".to_owned()];
+
+        assert_eq!(
+            agent_sandbox_mode_for_run(
+                AutomationRunMutability::ReadOnly,
+                AgentSandboxMode::DangerFullAccess
+            ),
+            SandboxMode::ReadOnly
+        );
+        assert_eq!(
+            agent_sandbox_policy_for_run(
+                AutomationRunMutability::ReadOnly,
+                AgentSandboxMode::WorkspaceWrite,
+                &roots
+            ),
+            serde_json::json!({
+                "type": "readOnly",
+                "networkAccess": true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_git_runtime_policy_disables_mutable_commands() {
+        let (_temp, store) = test_store().await;
+        let settings = update_settings(
+            &store,
+            "demo",
+            UpdateProjectSettings {
+                workspace_mode: Some(WorkspaceMode::GitWorktree),
+                max_code_edit_agents: Some(2),
+                agent_git_command_policy: Some(patchbay_types::AgentGitCommandPolicy {
+                    add: true,
+                    commit: true,
+                    push: true,
+                    reset: true,
+                    hard_reset: AgentGitHardResetPolicy::IsolatedWorkspaces,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let policy = git_runtime_policy_for_run(&settings, AutomationRunMutability::ReadOnly);
+
+        assert_eq!(policy.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(!policy.policy.add);
+        assert!(!policy.policy.commit);
+        assert!(!policy.policy.push);
+        assert!(!policy.policy.reset);
+        assert_eq!(policy.policy.hard_reset, AgentGitHardResetPolicy::Never);
+    }
+
     #[tokio::test]
     async fn stop_automation_releases_claimed_work_back_to_source_state() {
         let (temp, store) = test_store().await;
@@ -3752,9 +4207,15 @@ mod tests {
         .await
         .unwrap();
         let project = get_project(&store, "demo").await.unwrap();
-        let run = create_run(&store, project.id, AgentToolName::Codex, None)
-            .await
-            .unwrap();
+        let run = create_run(
+            &store,
+            project.id,
+            AgentToolName::Codex,
+            AutomationRunMutability::Mutating,
+            None,
+        )
+        .await
+        .unwrap();
         let agent_id = format!("patchbay-run-{}", run.id);
         claim_item(&store, "demo", &agent_id, "ready")
             .await

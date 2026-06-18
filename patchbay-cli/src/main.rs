@@ -887,10 +887,11 @@ async fn run_automation(command: AutomationCommand, context: ResolvedContext) ->
             output(args.json, &runs, || {
                 for run in &runs {
                     println!(
-                        "#{}\t{}\t{}\t{}\t{}",
+                        "#{}\t{}\t{}\t{}\t{}\t{}",
                         run.id,
                         run.status,
                         run.tool_name,
+                        run.mutability,
                         run_token_usage_text(run),
                         run.result_summary
                     );
@@ -901,6 +902,7 @@ async fn run_automation(command: AutomationCommand, context: ResolvedContext) ->
             let log = client.read_run_log(project, args.run_id).await?;
             output(args.json, &log, || {
                 println!("run #{} {}", log.run.id, log.run.status);
+                println!("mutability: {}", log.run.mutability);
                 println!("summary: {}", log.run.result_summary);
                 println!("tokens: {}", run_token_usage_text(&log.run));
                 println!("commit: {}", run_commit_outcome_text(&log.run));

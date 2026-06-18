@@ -169,6 +169,84 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    #[tokio::test]
+    async fn run_mutability_migration_defaults_existing_rows() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("patchbay.sqlite3");
+        let url = sqlite_url(&path);
+        let db = Database::connect(&url).await.unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys = ON".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let migration_count_before_mutability = Migrator::migrations()
+            .iter()
+            .position(|migration| {
+                migration.name() == "m20260618_000034_add_automation_run_mutability"
+            })
+            .unwrap() as u32;
+        Migrator::up(&db, Some(migration_count_before_mutability))
+            .await
+            .unwrap();
+        for statement in [
+            r#"DROP VIEW IF EXISTS "projects_read_view";"#,
+            r#"DROP VIEW IF EXISTS "agent_runs_read_view";"#,
+            r#"DROP VIEW IF EXISTS "automation_triggers_read_view";"#,
+            r#"ALTER TABLE "projects" DROP COLUMN "max_read_only_agents";"#,
+            r#"ALTER TABLE "agent_runs" DROP COLUMN "mutability";"#,
+            r#"ALTER TABLE "automation_triggers" DROP COLUMN "mutability";"#,
+            r#"INSERT INTO "projects" ("name", "display_name") VALUES ('demo', 'Demo');"#,
+            r#"INSERT INTO "automation_triggers" ("project_id", "name", "enabled", "activation", "tool_name") VALUES (1, 'Legacy trigger', 1, 'work_item', 'codex');"#,
+            r#"INSERT INTO "agent_runs" ("project_id", "tool_name", "status", "command", "working_dir") VALUES (1, 'codex', 'running', '', '/tmp/demo');"#,
+        ] {
+            db.execute(Statement::from_string(
+                DbBackend::Sqlite,
+                statement.to_owned(),
+            ))
+            .await
+            .unwrap();
+        }
+
+        Migrator::up(&db, None).await.unwrap();
+        let project = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                r#"SELECT "max_read_only_agents" FROM "projects" WHERE "id" = 1;"#.to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let trigger = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                r#"SELECT "mutability" FROM "automation_triggers" WHERE "id" = 1;"#.to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let run = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                r#"SELECT "mutability" FROM "agent_runs" WHERE "id" = 1;"#.to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            project.try_get::<i64>("", "max_read_only_agents").unwrap(),
+            2
+        );
+        assert_eq!(
+            trigger.try_get::<String>("", "mutability").unwrap(),
+            "mutating"
+        );
+        assert_eq!(run.try_get::<String>("", "mutability").unwrap(), "mutating");
+    }
+
     #[test]
     fn migration_history_names_all_current_migrations() {
         let migrations = Migrator::migrations();
@@ -211,6 +289,7 @@ mod tests {
             "m20260618_000031_remove_automation_modes",
             "m20260618_000032_remove_refinement_concurrency_setting",
             "m20260618_000033_add_feedback_request_workflow",
+            "m20260618_000034_add_automation_run_mutability",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());

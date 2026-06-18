@@ -60,6 +60,7 @@ pub struct UpdateProject {
 pub struct UpdateProjectSettings {
     pub workspace_mode: Option<WorkspaceMode>,
     pub max_code_edit_agents: Option<i64>,
+    pub max_read_only_agents: Option<i64>,
     pub create_pr: Option<bool>,
     pub auto_commit: Option<bool>,
     pub commit_standard: Option<String>,
@@ -141,6 +142,7 @@ impl From<ProjectModel> for ProjectView {
                 .parse::<WorkspaceMode>()
                 .expect("project workspace mode must be valid"),
             max_code_edit_agents: project.max_code_edit_agents,
+            max_read_only_agents: project.max_read_only_agents,
             create_pr: project.create_pr,
             auto_commit: project.auto_commit,
             commit_standard: project.commit_standard,
@@ -225,6 +227,7 @@ pub async fn create_project(store: &Store, create: CreateProject) -> Result<Proj
         memory: Set(memory),
         workspace_mode: Set(WorkspaceMode::CurrentBranch.as_storage().to_owned()),
         max_code_edit_agents: Set(1),
+        max_read_only_agents: Set(2),
         create_pr: Set(false),
         auto_commit: Set(true),
         commit_standard: Set(String::new()),
@@ -692,6 +695,7 @@ pub async fn update_settings(
 ) -> Result<ProjectSettingsView> {
     if update.workspace_mode.is_none()
         && update.max_code_edit_agents.is_none()
+        && update.max_read_only_agents.is_none()
         && update.create_pr.is_none()
         && update.auto_commit.is_none()
         && update.commit_standard.is_none()
@@ -715,6 +719,9 @@ pub async fn update_settings(
     let max_code_edit_agents = update
         .max_code_edit_agents
         .unwrap_or(existing.max_code_edit_agents);
+    let max_read_only_agents = update
+        .max_read_only_agents
+        .unwrap_or(existing.max_read_only_agents);
     let create_pr = update.create_pr.unwrap_or(existing.create_pr);
     let auto_commit = update.auto_commit.unwrap_or(existing.auto_commit);
     let commit_standard = update
@@ -768,6 +775,7 @@ pub async fn update_settings(
     validate_settings(
         workspace_mode,
         max_code_edit_agents,
+        max_read_only_agents,
         create_pr,
         stale_claim_minutes,
         default_agent_model.as_deref(),
@@ -776,6 +784,7 @@ pub async fn update_settings(
     let mut active: ProjectActiveModel = existing.into();
     active.workspace_mode = Set(workspace_mode.as_storage().to_owned());
     active.max_code_edit_agents = Set(max_code_edit_agents);
+    active.max_read_only_agents = Set(max_read_only_agents);
     active.create_pr = Set(create_pr);
     active.auto_commit = Set(auto_commit);
     active.commit_standard = Set(commit_standard);
@@ -1047,6 +1056,7 @@ async fn update_project_path_status(
 pub(crate) fn validate_settings(
     workspace_mode: WorkspaceMode,
     max_code_edit_agents: i64,
+    max_read_only_agents: i64,
     create_pr: bool,
     stale_claim_minutes: i64,
     default_agent_model: Option<&str>,
@@ -1056,6 +1066,9 @@ pub(crate) fn validate_settings(
     }
     if max_code_edit_agents > 1 && workspace_mode != WorkspaceMode::GitWorktree {
         bail!("only git_worktree strategy can run multiple agents in parallel");
+    }
+    if max_read_only_agents < 0 {
+        bail!("max read-only agents cannot be negative");
     }
     if create_pr && workspace_mode == WorkspaceMode::CurrentBranch {
         bail!("pull requests can only be created for git_worktree or git_branch strategies");
@@ -1088,6 +1101,7 @@ fn project_settings_to_view(project: ProjectModel) -> Result<ProjectSettingsView
         project_id: project.id,
         workspace_mode: WorkspaceMode::from_str(&project.workspace_mode)?,
         max_code_edit_agents: project.max_code_edit_agents,
+        max_read_only_agents: project.max_read_only_agents,
         create_pr: project.create_pr,
         auto_commit: project.auto_commit,
         commit_standard: project.commit_standard,
@@ -1570,6 +1584,7 @@ mod tests {
 
         assert_eq!(settings.workspace_mode, WorkspaceMode::CurrentBranch);
         assert_eq!(allowed_code_edit_agents(&settings), 1);
+        assert_eq!(settings.max_read_only_agents, 2);
         assert!(!settings.create_pr);
         assert!(settings.auto_commit);
         assert_eq!(settings.commit_standard, "");
@@ -1678,6 +1693,7 @@ mod tests {
             "demo",
             UpdateProjectSettings {
                 workspace_mode: Some(WorkspaceMode::GitBranch),
+                max_read_only_agents: Some(4),
                 create_pr: Some(true),
                 auto_commit: Some(false),
                 commit_standard: Some(" Use Conventional Commits. ".to_owned()),
@@ -1707,6 +1723,8 @@ mod tests {
         assert_eq!(settings.project_id, project.id);
         assert_eq!(settings.workspace_mode, WorkspaceMode::GitBranch);
         assert_eq!(project.workspace_mode, WorkspaceMode::GitBranch);
+        assert_eq!(settings.max_read_only_agents, 4);
+        assert_eq!(project.max_read_only_agents, 4);
         assert!(!settings.auto_commit);
         assert!(!project.auto_commit);
         assert_eq!(settings.commit_standard, "Use Conventional Commits.");
@@ -1785,6 +1803,36 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("at least 1"));
+    }
+
+    #[tokio::test]
+    async fn settings_allow_zero_read_only_agents_but_reject_negative_values() {
+        let (temp, store) = test_store().await;
+        create_demo_project(&store, project_path(&temp, "demo")).await;
+
+        let settings = update_settings(
+            &store,
+            "demo",
+            UpdateProjectSettings {
+                max_read_only_agents: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(settings.max_read_only_agents, 0);
+        let err = update_settings(
+            &store,
+            "demo",
+            UpdateProjectSettings {
+                max_read_only_agents: Some(-1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("max read-only agents"));
     }
 
     #[tokio::test]

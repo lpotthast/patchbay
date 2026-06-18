@@ -58,7 +58,7 @@ GET /api/projects/{project}/automation/runs/{run_id}/log
 GET /api/projects/{project}/automation/sessions
 ```
 
-Automation run responses use `AgentRunView`, which includes reported Codex token usage for the run when available. Usage is reported as input tokens, cached input tokens, output tokens, and a derived total. Run-log responses include active in-memory session output while a run is still ongoing and fall back to the persisted output log when no active session is present.
+Automation run responses use `AgentRunView`, which includes run mutability (`mutating` or `read_only`) and reported Codex token usage for the run when available. Usage is reported as input tokens, cached input tokens, output tokens, and a derived total. Run-log responses include active in-memory session output while a run is still ongoing and fall back to the persisted output log when no active session is present.
 
 Event endpoints:
 
@@ -98,6 +98,8 @@ CrudKit-generated routes are mounted under `/api` for ordinary admin resources:
 
 CrudKit is not used for custom workflow authority. Admin CRUD can inspect and maintain records, but workflow transitions should use the custom endpoints so server services apply Patchbay rules consistently.
 
+Automation rule CRUD exposes the explicit run mutability for work-consuming rules. Create and update requests validate storage values `mutating` and `read_only`; new custom rules default to `mutating` unless the operator chooses read-only. Existing rules migrated from older schemas remain `mutating` until edited.
+
 ## UI Form Endpoints
 
 The Leptos UI uses server form handlers for operator actions such as:
@@ -105,6 +107,7 @@ The Leptos UI uses server form handlers for operator actions such as:
 - creating, updating, and deleting projects;
 - updating project prompts, memory, and settings;
 - toggling project auto-commit and updating project commit, revert, and mutable Git command policy;
+- updating the independent read-only automation concurrency limit;
 - creating, updating, moving, deleting, and commenting on work items;
 - starting, stopping, and recovering automation;
 - canceling an individual active automation run;
@@ -115,6 +118,8 @@ The Leptos UI uses server form handlers for operator actions such as:
 - picking folders on the local system.
 
 These endpoints are UI integration points, not the stable agent-facing API.
+
+Direct automation starts may include an explicit mutability value. Omitted mutability defaults to `mutating`; work-producing evaluations ignore run mutability because they do not launch agents. Automation status responses include aggregate running runs plus separate mutating/read-only running counts and the effective mutating allowance.
 
 Hydrated UI controls that save data in the background may post to these same form handlers with an internal background-request marker. Those requests should return a non-navigating success response while ordinary form posts keep their redirect fallback.
 
@@ -131,6 +136,8 @@ API errors should be explicit enough for the CLI to show actionable output. Impo
 - caller does not own the claim;
 - stale expected version;
 - automation tool unavailable;
+- read-only launch unsupported by the selected agent tool;
+- automation concurrency limit reached for the requested mutability;
 - run log unavailable.
 
 The server should prefer structured error responses over plain text so CLI and future clients can distinguish user errors from server failures.

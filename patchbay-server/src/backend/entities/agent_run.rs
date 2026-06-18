@@ -9,6 +9,10 @@ pub type AgentRunModel = Model;
 pub type AgentRunActiveModel = ActiveModel;
 pub type AgentRunId = ModelId;
 
+fn default_mutability_storage() -> String {
+    "mutating".to_owned()
+}
+
 #[derive(
     Clone,
     Debug,
@@ -52,6 +56,11 @@ pub struct Model {
     pub trigger_name: Option<String>,
 
     pub tool_name: String,
+
+    #[serde(default = "default_mutability_storage")]
+    #[ck_create_model(exclude)]
+    #[ck_update_model(exclude)]
+    pub mutability: String,
 
     #[ck_create_model(exclude)]
     #[ck_update_model(exclude)]

@@ -94,20 +94,26 @@ For the claimed item, omit project, agent, and item id arguments unless intentio
 
 ## Automation Rule Behavior
 
-Automation rules either produce work items or consume work items. Work-consuming automation does not classify behavior with a separate mode field. The rule prompt tells the launched agent how to handle the claimed item, including whether the expected outcome is implementation, refinement, verification, review preparation, or another project-specific workflow.
+Automation rules either produce work items or consume work items. Work-consuming automation has an explicit run mutability, either `mutating` or `read_only`. The rule prompt tells the launched agent how to handle the claimed item, including whether the expected outcome is implementation, refinement, verification, review preparation, or another project-specific workflow.
 
 When a launched agent exits successfully while its item is still claimed, Patchbay releases the temporary claim back to the claimed-from state without adding `patchbay:automation-blocked`. This lets prompt-directed metadata, refinement, or verification consumers leave the underlying implementation work available for later automation. Failed runs still release with automation blocked so a broken prompt, missing context, or sandbox failure does not loop indefinitely. An agent can call `patchbay item request-feedback --body ...` when it needs a user answer before work can continue; it can call `patchbay item release --comment ...` for technical blockers or handoffs that need human triage but are not a concrete feedback request.
 
 Patchbay ships editable default consumers for label-routed story preparation:
 
-- a refiner for items labeled `needs-refinement`;
-- a verifier for items labeled `needs-verification`.
+- a read-only refiner for items labeled `needs-refinement`;
+- a read-only verifier for items labeled `needs-verification`.
 
 Their prompts tell agents not to implement the work and not to call `patchbay item finish` for successful refinement or verification. The verifier may move an unnecessary item to a terminal workflow state only when that state is already evident from the project's user-defined workflow vocabulary; Patchbay does not hardcode a universal state value for that instruction.
 
 Review-style work that should not run automatically is modeled as work-producing automation: a manual evaluation creates a review item with the expensive prompt, and a work-consuming automation can later run an agent against that item.
 
 For Codex-backed launches, Patchbay prepares a project-specific Codex home before the run starts. The project home contains generated Codex config and rules derived from project settings, while shared Codex auth and skills are linked from Patchbay's shared managed Codex home when present. The run sets `CODEX_HOME` and `CODEX_SQLITE_HOME` to that project home so settings, rules, logs, sessions, and SQLite state are isolated per project.
+
+## Automation Concurrency
+
+Mutating and read-only runs use independent admission limits. A mutating run can start only when the running mutating count is below the workspace-constrained code-edit allowance derived from `max_code_edit_agents`; current-branch projects still cap that allowance at one. A read-only run can start only when the running read-only count is below `max_read_only_agents`; setting the read-only limit to zero disables read-only automation admission. Running read-only runs do not consume mutating slots, and running mutating runs do not consume read-only slots.
+
+Queued automation evaluation and work-item polling evaluate admission against the candidate trigger's mutability. Status views expose both running counts and the effective mutating allowance so skipped or rejected starts can explain which limit was reached.
 
 ## Workspaces
 
@@ -119,9 +125,11 @@ Project settings choose the workspace policy:
 
 When worktrees or branches are used, run records capture the working directory, branch, and cleanup status. Cleanup can be manual or automatic after successful runs, depending on project settings.
 
+Read-only runs do not allocate isolated branches or worktrees. They use the project checkout as their working directory with a read-only Codex sandbox and a read-only sandbox policy with network access enabled. Read-only Codex launches ignore project writable-root settings and project sandbox mode because the run mutability requires no project writable roots.
+
 ## Commit And Revert Policy
 
-Project settings define an automation commit policy. `auto_commit` defaults to on and controls whether current-branch runs are instructed to commit completed work before finishing. Agents generate the commit message from the completed diff and follow the project commit standard text when it is configured, otherwise they infer the repository's existing commit style.
+Project settings define an automation commit policy. `auto_commit` defaults to on and controls whether current-branch mutating runs are instructed to commit completed work before finishing. Agents generate the commit message from the completed diff and follow the project commit standard text when it is configured, otherwise they infer the repository's existing commit style.
 
 Current-branch runs are instructed to inspect the initial git status, commit completed work only when auto-commit is enabled, and revert their own changes before releasing incomplete work. The current-branch failure revert strategy defaults to manual revert and can be changed to Git reset for projects that intentionally allow that more destructive cleanup path.
 
@@ -132,6 +140,8 @@ Patchbay records the run-level commit requirement and final commit outcome. The 
 Project settings also define the mutable Git command policy. New and migrated projects allow `git add`, `git commit`, `git push`, and `git reset` by default. `git commit` must use `--no-verify`; Patchbay's Git guard injects it when omitted and rejects `--verify`. Pushes must not be force, mirror, prune, delete, empty-source delete-refspec, or `+ref` pushes. `git reset --hard` is allowed only when the hard-reset policy allows it for isolated Git branch or Git worktree runs; it is blocked for current-branch runs by default.
 
 Patchbay expresses the broad allow-list through generated Codex rules in the project Codex home. A run-specific `git` shim remains necessary for argument checks that prefix rules cannot express, such as a force-push flag appearing after the remote name. The generated prompt includes the effective Git commands expected to work for the run.
+
+Read-only runs always receive a run-level Git policy with `add`, `commit`, `push`, and `reset` disabled regardless of the project's mutating Git policy. They have no commit requirement, do not request pull requests, and record commit handling as not required. The generated prompt states that project files may not be edited, mutable Git commands are unavailable, no commit is required, and sandbox or Git blockers should be reported instead of worked around. Read-only runs may still update Patchbay-owned metadata through authorized CLI/API calls when their prompt asks for that work.
 
 ## Stale Claims
 
@@ -145,6 +155,6 @@ Automation output is captured by the server and exposed through run-log endpoint
 
 ## Pull Requests
 
-When project settings request pull request creation, successful automation can run the configured GitHub CLI flow from the prepared workspace and record the resulting PR URL on the run.
+When project settings request pull request creation, successful mutating automation can run the configured GitHub CLI flow from the prepared workspace and record the resulting PR URL on the run.
 
 Pull request creation is a server-side post-run operation. Failure to create a PR should be recorded on the run without rewriting the completed item state unless server policy requires it.

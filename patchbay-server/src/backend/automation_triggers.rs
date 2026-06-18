@@ -26,8 +26,8 @@ use crate::{
         storage::{Store, utc_now},
     },
     shared::view_models::{
-        AgentToolName, AutomationActivation, AutomationEffect, AutomationTriggerView,
-        TriggerRunOutcome, default_automation_work_item_selector,
+        AgentToolName, AutomationActivation, AutomationEffect, AutomationRunMutability,
+        AutomationTriggerView, TriggerRunOutcome, default_automation_work_item_selector,
         needs_refinement_automation_work_item_selector,
         needs_verification_automation_work_item_selector,
     },
@@ -78,6 +78,7 @@ struct DefaultProjectAutomation {
     prompt: &'static str,
     selector: fn() -> Condition,
     priority: i64,
+    mutability: AutomationRunMutability,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +89,7 @@ pub struct CreateAutomationTrigger {
     pub effect: AutomationEffect,
     pub schedule: String,
     pub tool_name: Option<AgentToolName>,
+    pub mutability: AutomationRunMutability,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
     pub priority: i64,
@@ -100,6 +102,7 @@ pub struct UpdateAutomationTrigger {
     pub activation: AutomationActivation,
     pub effect: AutomationEffect,
     pub schedule: String,
+    pub mutability: AutomationRunMutability,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
     pub priority: Option<i64>,
@@ -164,6 +167,7 @@ pub async fn create_trigger(
         effect: Set(create.effect.as_storage().to_owned()),
         schedule: Set(schedule),
         tool_name: Set(tool_name.as_storage().to_owned()),
+        mutability: Set(create.mutability.as_storage().to_owned()),
         prompt: Set(create.prompt),
         work_item_selector: Set(selector_to_storage(work_item_selector.as_ref())?),
         priority: Set(create.priority),
@@ -255,6 +259,7 @@ pub async fn update_trigger(
     active.activation = Set(update.activation.as_storage().to_owned());
     active.effect = Set(update.effect.as_storage().to_owned());
     active.schedule = Set(schedule);
+    active.mutability = Set(update.mutability.as_storage().to_owned());
     active.tool_name = Set(default_tool.as_storage().to_owned());
     active.prompt = Set(update.prompt);
     active.work_item_selector = Set(selector_to_storage(work_item_selector.as_ref())?);
@@ -426,7 +431,7 @@ async fn run_queued_evaluations(
         let project_name = project_name_for_id(store, trigger.project_id).await?;
         let view = model_to_view(trigger.clone())?;
         if view.effect == AutomationEffect::ConsumeWork
-            && !automation::can_start_automation_run(store, &project_name).await?
+            && !automation::can_start_automation_run(store, &project_name, view.mutability).await?
         {
             continue;
         }
@@ -469,9 +474,6 @@ async fn run_next_work_item_automation_for_project(
     sessions: Option<ProcessSessionRegistry>,
     cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<Option<TriggerRunOutcome>> {
-    if !automation::can_start_automation_run(store, project_name).await? {
-        return Ok(None);
-    }
     let project_id = projects::project_id(store, project_name).await?;
     let triggers = AutomationTrigger::find()
         .filter(automation_trigger::Column::ProjectId.eq(project_id))
@@ -490,6 +492,9 @@ async fn run_next_work_item_automation_for_project(
     for trigger in triggers {
         let view = model_to_view(trigger.clone())?;
         if !trigger_is_due(view.next_evaluation_at.as_deref()) {
+            continue;
+        }
+        if !automation::can_start_automation_run(store, project_name, view.mutability).await? {
             continue;
         }
         let Some(selector) = view.work_item_selector.as_ref() else {
@@ -754,6 +759,7 @@ async fn run_trigger_once(
             work_item_id,
             work_item_selector: view.work_item_selector.clone(),
             extra_prompt: Some(view.prompt.clone()),
+            mutability: Some(view.mutability),
             trigger: Some(AutomationTriggerOrigin {
                 trigger_id: view.id,
                 trigger_name: view.name.clone(),
@@ -988,18 +994,21 @@ fn default_project_automations() -> [DefaultProjectAutomation; 3] {
             prompt: "",
             selector: default_work_item_selector,
             priority: 0,
+            mutability: AutomationRunMutability::Mutating,
         },
         DefaultProjectAutomation {
             name: DEFAULT_REFINEMENT_AUTOMATION_NAME,
             prompt: DEFAULT_REFINEMENT_AUTOMATION_PROMPT,
             selector: default_refinement_work_item_selector,
             priority: REFINEMENT_AUTOMATION_PRIORITY,
+            mutability: AutomationRunMutability::ReadOnly,
         },
         DefaultProjectAutomation {
             name: DEFAULT_VERIFICATION_AUTOMATION_NAME,
             prompt: DEFAULT_VERIFICATION_AUTOMATION_PROMPT,
             selector: default_verification_work_item_selector,
             priority: VERIFICATION_AUTOMATION_PRIORITY,
+            mutability: AutomationRunMutability::ReadOnly,
         },
     ]
 }
@@ -1048,6 +1057,7 @@ where
         effect: Set(AutomationEffect::ConsumeWork.as_storage().to_owned()),
         schedule: Set(DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned()),
         tool_name: Set(default_tool.to_owned()),
+        mutability: Set(default.mutability.as_storage().to_owned()),
         prompt: Set(default.prompt.to_owned()),
         work_item_selector: Set(selector_to_storage(Some(&selector))?),
         priority: Set(default.priority),
@@ -1170,6 +1180,7 @@ fn model_to_view(trigger: AutomationTriggerModel) -> Result<AutomationTriggerVie
         effect: AutomationEffect::from_str(&trigger.effect)?,
         schedule: trigger.schedule,
         tool_name: AgentToolName::from_str(&trigger.tool_name)?,
+        mutability: AutomationRunMutability::from_str(&trigger.mutability)?,
         prompt: trigger.prompt,
         work_item_selector: selector_from_storage(trigger.work_item_selector.as_deref())?,
         priority: trigger.priority,
@@ -1238,6 +1249,7 @@ mod tests {
 
         assert_eq!(automation.activation, AutomationActivation::WorkItem);
         assert_eq!(automation.effect, AutomationEffect::ConsumeWork);
+        assert_eq!(automation.mutability, AutomationRunMutability::Mutating);
         assert_eq!(automation.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
         assert_eq!(
             automation.work_item_selector,
@@ -1250,6 +1262,7 @@ mod tests {
         let refiner = automation_by_name(&automations, DEFAULT_REFINEMENT_AUTOMATION_NAME);
         assert_eq!(refiner.activation, AutomationActivation::WorkItem);
         assert_eq!(refiner.effect, AutomationEffect::ConsumeWork);
+        assert_eq!(refiner.mutability, AutomationRunMutability::ReadOnly);
         assert_eq!(refiner.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
         assert_eq!(
             refiner.work_item_selector,
@@ -1271,6 +1284,7 @@ mod tests {
         let verifier = automation_by_name(&automations, DEFAULT_VERIFICATION_AUTOMATION_NAME);
         assert_eq!(verifier.activation, AutomationActivation::WorkItem);
         assert_eq!(verifier.effect, AutomationEffect::ConsumeWork);
+        assert_eq!(verifier.mutability, AutomationRunMutability::ReadOnly);
         assert_eq!(verifier.schedule, DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE);
         assert_eq!(
             verifier.work_item_selector,
@@ -1298,6 +1312,52 @@ mod tests {
             .iter()
             .find(|automation| automation.name == name)
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn trigger_create_and_update_round_trip_mutability() {
+        let (_temp, store) = test_store().await;
+        let trigger = create_trigger(
+            &store,
+            "demo",
+            CreateAutomationTrigger {
+                name: "read-only-review".to_owned(),
+                enabled: true,
+                activation: AutomationActivation::WorkItem,
+                effect: AutomationEffect::ConsumeWork,
+                schedule: "@every 15s".to_owned(),
+                tool_name: None,
+                mutability: AutomationRunMutability::ReadOnly,
+                prompt: "Review metadata.".to_owned(),
+                work_item_selector: Some(default_work_item_selector()),
+                priority: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(trigger.mutability, AutomationRunMutability::ReadOnly);
+        let updated = update_trigger(
+            &store,
+            "demo",
+            trigger.id,
+            UpdateAutomationTrigger {
+                name: "mutating-review".to_owned(),
+                enabled: true,
+                activation: AutomationActivation::WorkItem,
+                effect: AutomationEffect::ConsumeWork,
+                schedule: "@every 15s".to_owned(),
+                mutability: AutomationRunMutability::Mutating,
+                prompt: "Review and edit.".to_owned(),
+                work_item_selector: Some(default_work_item_selector()),
+                priority: Some(6),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.mutability, AutomationRunMutability::Mutating);
+        assert_eq!(updated.priority, 6);
     }
 
     #[tokio::test]
@@ -1444,6 +1504,7 @@ mod tests {
             effect: AutomationEffect::ConsumeWork,
             schedule: DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned(),
             tool_name: AgentToolName::Codex,
+            mutability: AutomationRunMutability::Mutating,
             prompt: String::new(),
             work_item_selector: Some(default_work_item_selector()),
             priority,
@@ -1471,6 +1532,7 @@ mod tests {
                 effect: AutomationEffect::ConsumeWork,
                 schedule: "@every 15s".to_owned(),
                 tool_name: None,
+                mutability: AutomationRunMutability::ReadOnly,
                 prompt: "Refine this new work item.".to_owned(),
                 work_item_selector: Some(default_work_item_selector()),
                 priority: 0,
@@ -1511,6 +1573,7 @@ mod tests {
         assert!(outcomes[0].run.is_some());
         assert_eq!(run.trigger_id, Some(trigger.id));
         assert_eq!(run.trigger_name.as_deref(), Some("refine-new-work"));
+        assert_eq!(run.mutability, AutomationRunMutability::ReadOnly);
         assert_eq!(trigger_runs.len(), 1);
         assert_eq!(trigger_runs[0].id, run.id);
         assert_eq!(item.claimed_by, None);
@@ -1535,6 +1598,7 @@ mod tests {
                 effect: AutomationEffect::ProduceWork,
                 schedule: "@every 15s".to_owned(),
                 tool_name: None,
+                mutability: AutomationRunMutability::Mutating,
                 prompt: "Perform an expensive deep review.".to_owned(),
                 work_item_selector: None,
                 priority: 100,

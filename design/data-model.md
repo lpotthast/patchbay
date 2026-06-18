@@ -15,7 +15,7 @@ Project data includes:
 - automation concurrency settings;
 - stale-claim timeout;
 - pull request and worktree cleanup preferences;
-- default agent tool, model, and reasoning effort.
+- default agent tool, model, and reasoning effort;
 - agent sandbox mode, extra writable roots, and mutable Git command policy.
 
 All item and automation API calls are project-scoped. Missing project context is an error for agent-facing operations.
@@ -78,6 +78,7 @@ Run data includes:
 
 - project and optional work item;
 - tool name;
+- run mutability: `mutating` or `read_only`;
 - status: `running`, `completed`, `failed`, or `cancelled`;
 - command and working directory;
 - worktree path and branch name when applicable;
@@ -110,15 +111,24 @@ Supported effects are:
 - `produce_work`: creates a work item from the automation prompt and does not launch an agent;
 - `consume_work`: schedules an agent run for a matching work item.
 
-Automation records include enabled state, activation, effect, tool, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
+Automation records include enabled state, activation, effect, mutability, tool, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
+
+Work-consuming automation has an explicit run mutability:
+
+- `mutating`: the launched agent may edit the project checkout according to the project workspace, sandbox, Git, commit, and pull-request settings.
+- `read_only`: the launched agent may inspect the project checkout and write Patchbay-owned metadata through the API/CLI, but must not edit project files, Git index or refs, commits, pushes, resets, branches, worktrees, or pull requests.
+
+Patchbay persists the selected mutability onto `agent_runs` when a run is created so concurrency accounting, logs, run views, and audit history remain stable even if the automation rule changes later. Direct starts without a trigger default to `mutating` unless the caller explicitly supplies a mutability value. Work-producing automation does not launch an agent and has no run mutability or concurrency effect.
 
 Default project automation rules are ordinary editable records. Patchbay creates and migrates these defaults:
 
-- `Claim open work`: consume-work, selector `state=open` plus absence of `needs-refinement`, `needs-verification`, and `patchbay:feedback-requested`.
-- `Refine needs-refinement work`: consume-work, selector requiring the `needs-refinement` label.
-- `Verify needs-verification work`: consume-work, selector requiring the `needs-verification` label.
+- `Claim open work`: mutating consume-work, selector `state=open` plus absence of `needs-refinement`, `needs-verification`, and `patchbay:feedback-requested`.
+- `Refine needs-refinement work`: read-only consume-work, selector requiring the `needs-refinement` label.
+- `Verify needs-verification work`: read-only consume-work, selector requiring the `needs-verification` label.
 
 The refiner and verifier prompts instruct agents to update item title, description, comments, and labels, remove the triggering label when complete, and leave the underlying implementation work unfinished for later automation or humans.
+
+Migrations default existing automation triggers and existing agent runs to `mutating`. Patchbay must not infer `read_only` from trigger names, selectors, labels, or prompt text; operators opt existing custom automation into read-only behavior explicitly.
 
 ## Settings
 
@@ -126,6 +136,7 @@ Project settings control automation behavior:
 
 - workspace mode: current branch, Git branch, or Git worktree;
 - maximum concurrent code-edit agents;
+- maximum concurrent read-only agents;
 - pull request creation;
 - auto-commit behavior for current-branch automation;
 - commit standard text used in generated agent commit instructions;
@@ -137,4 +148,4 @@ Project settings control automation behavior:
 - agent sandbox mode and extra writable roots.
 
 Settings are applied by server services at launch and workflow boundaries, not by the agent-facing CLI.
-Selector/prompt-based automations do not have a separate project-level refinement concurrency exception. A first-class distinction between mutating and read-only automation runs is separate future work tracked by #78.
+Mutating runs are limited by `max_code_edit_agents` after applying workspace-mode safety constraints such as the single mutating run cap for current-branch projects. Read-only runs are limited independently by `max_read_only_agents`, default to two concurrent runs for new and migrated projects, and may be disabled with zero. Selector/prompt-based automations do not have a separate project-level refinement concurrency exception.

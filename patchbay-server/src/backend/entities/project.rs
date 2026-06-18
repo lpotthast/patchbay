@@ -62,6 +62,9 @@ pub struct Model {
     pub max_code_edit_agents: i64,
 
     #[ck_create_model(exclude)]
+    pub max_read_only_agents: i64,
+
+    #[ck_create_model(exclude)]
     pub create_pr: bool,
 
     #[ck_create_model(exclude)]

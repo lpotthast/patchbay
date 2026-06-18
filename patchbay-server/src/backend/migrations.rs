@@ -31,6 +31,7 @@ enum Projects {
     Memory,
     WorkspaceMode,
     MaxCodeEditAgents,
+    MaxReadOnlyAgents,
     CreatePr,
     AutoCommit,
     CommitStandard,
@@ -153,6 +154,7 @@ enum AgentRuns {
     TriggerName,
     Mode,
     ToolName,
+    Mutability,
     Status,
     Command,
     WorkingDir,
@@ -193,6 +195,7 @@ enum AutomationTriggers {
     Schedule,
     Mode,
     ToolName,
+    Mutability,
     Prompt,
     WorkItemSelector,
     Priority,
@@ -309,6 +312,7 @@ impl MigratorTrait for Migrator {
             Box::new(RemoveAutomationModes),
             Box::new(RemoveRefinementConcurrencySetting),
             Box::new(AddFeedbackRequestWorkflow),
+            Box::new(AddAutomationRunMutability),
         ]
     }
 }
@@ -467,6 +471,12 @@ async fn create_projects(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                         .big_integer()
                         .not_null()
                         .default(1),
+                )
+                .col(
+                    ColumnDef::new(Projects::MaxReadOnlyAgents)
+                        .big_integer()
+                        .not_null()
+                        .default(2),
                 )
                 .col(
                     ColumnDef::new(Projects::CreatePr)
@@ -918,6 +928,12 @@ async fn create_agent_runs(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                 .col(ColumnDef::new(AgentRuns::TriggerName).string().null())
                 .col(ColumnDef::new(AgentRuns::Mode).string().not_null())
                 .col(ColumnDef::new(AgentRuns::ToolName).string().not_null())
+                .col(
+                    ColumnDef::new(AgentRuns::Mutability)
+                        .string()
+                        .not_null()
+                        .default("mutating"),
+                )
                 .col(ColumnDef::new(AgentRuns::Status).string().not_null())
                 .col(ColumnDef::new(AgentRuns::Command).text().not_null())
                 .col(ColumnDef::new(AgentRuns::WorkingDir).string().not_null())
@@ -1070,6 +1086,12 @@ async fn create_automation_triggers(manager: &SchemaManager<'_>) -> Result<(), D
                     ColumnDef::new(AutomationTriggers::ToolName)
                         .string()
                         .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AutomationTriggers::Mutability)
+                        .string()
+                        .not_null()
+                        .default("mutating"),
                 )
                 .col(
                     ColumnDef::new(AutomationTriggers::Prompt)
@@ -2492,6 +2514,69 @@ impl MigrationTrait for AddFeedbackRequestWorkflow {
     }
 }
 
+struct AddAutomationRunMutability;
+
+impl MigrationName for AddAutomationRunMutability {
+    fn name(&self) -> &str {
+        "m20260618_000034_add_automation_run_mutability"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAutomationRunMutability {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "projects_read_view").await?;
+        drop_read_view(manager, "agent_runs_read_view").await?;
+        drop_read_view(manager, "automation_triggers_read_view").await?;
+        add_column_if_missing(
+            manager,
+            "projects",
+            "max_read_only_agents",
+            "BIGINT NOT NULL DEFAULT 2",
+        )
+        .await?;
+        add_column_if_missing(
+            manager,
+            "agent_runs",
+            "mutability",
+            "TEXT NOT NULL DEFAULT 'mutating'",
+        )
+        .await?;
+        add_column_if_missing(
+            manager,
+            "automation_triggers",
+            "mutability",
+            "TEXT NOT NULL DEFAULT 'mutating'",
+        )
+        .await?;
+        create_read_view(manager, "projects", "projects_read_view").await?;
+        create_read_view(manager, "agent_runs", "agent_runs_read_view").await?;
+        create_read_view(
+            manager,
+            "automation_triggers",
+            "automation_triggers_read_view",
+        )
+        .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "projects_read_view").await?;
+        drop_read_view(manager, "agent_runs_read_view").await?;
+        drop_read_view(manager, "automation_triggers_read_view").await?;
+        drop_column_if_present(manager, "automation_triggers", "mutability").await?;
+        drop_column_if_present(manager, "agent_runs", "mutability").await?;
+        drop_column_if_present(manager, "projects", "max_read_only_agents").await?;
+        create_read_view(manager, "projects", "projects_read_view").await?;
+        create_read_view(manager, "agent_runs", "agent_runs_read_view").await?;
+        create_read_view(
+            manager,
+            "automation_triggers",
+            "automation_triggers_read_view",
+        )
+        .await
+    }
+}
+
 async fn update_default_open_work_selector(
     manager: &SchemaManager<'_>,
     target_selector: &str,
@@ -3225,6 +3310,13 @@ async fn add_project_run_settings_columns(manager: &SchemaManager<'_>) -> Result
         "projects",
         "max_code_edit_agents",
         "BIGINT NOT NULL DEFAULT 1",
+    )
+    .await?;
+    add_column_if_missing(
+        manager,
+        "projects",
+        "max_read_only_agents",
+        "BIGINT NOT NULL DEFAULT 2",
     )
     .await?;
     add_column_if_missing(

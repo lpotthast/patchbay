@@ -210,6 +210,8 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         assert_source_does_not_contain(driver, "project-option-key").await?;
         assert_source_contains(driver, "Memory").await?;
         assert_source_contains(driver, "Automation policy").await?;
+        assert_source_contains(driver, "Read-only agents").await?;
+        find(driver, By::Css("#project-max-read-only-agents")).await?;
         assert_source_contains(driver, "Auto-Commit").await?;
         find(driver, By::Css("#project-auto-commit")).await?;
         find(driver, By::Css("#project-commit-standard")).await?;
@@ -294,6 +296,7 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         )
         .await?;
         assert_source_contains(driver, "No runs yet").await?;
+        assert_source_contains(driver, "0 running (0 mutating, 0 read-only)").await?;
         assert_source_does_not_contain(driver, "data-crudkit-leptos=\"automation-triggers\"")
             .await?;
 
@@ -312,6 +315,7 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         assert_source_contains(driver, "data-crudkit-leptos=\"automation-triggers\"").await?;
         assert_source_contains(driver, "Work-consuming automations").await?;
         assert_source_contains(driver, "Work-producing automations").await?;
+        assert_source_contains(driver, "Mutability").await?;
         assert_source_contains(driver, "No automation selected").await?;
         assert_source_does_not_contain(driver, "Create trigger").await?;
         assert_source_does_not_contain(driver, "trigger-edit-form").await?;
@@ -1184,6 +1188,7 @@ async fn create_trigger(driver: &WebDriver) -> Result<(), Report> {
                         effect: 'consume_work',
                         schedule: '@every 15s',
                         tool_name: 'codex',
+                        mutability: 'read_only',
                         prompt: 'Refine new work items.',
                         work_item_selector: '{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}}]}',
                         priority: 0

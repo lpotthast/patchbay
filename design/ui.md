@@ -68,7 +68,7 @@ Project settings should expose:
 - system prompt and memory;
 - system prompt and memory history snapshots, with manual history compaction;
 - workspace mode;
-- agent concurrency;
+- agent concurrency for mutating and read-only automation;
 - pull request creation;
 - current-branch auto-commit behavior;
 - commit standard text for generated agent commit messages;
@@ -79,7 +79,7 @@ Project settings should expose:
 - default agent tool, model, and reasoning effort.
 
 Settings changes should go through server handlers and be reflected in automation launches without requiring agents to know settings internals.
-Selector/prompt-based automations do not expose a project-level refinement concurrency exception in settings. Any future read-only automation concurrency policy should be explicit and is tracked separately by #78.
+Selector/prompt-based automations do not expose a project-level refinement concurrency exception in settings. Read-only automation concurrency is a general setting, not a refinement-specific bypass.
 
 Codex configuration generated from project settings should not be exposed as raw TOML in the main UI. Operators configure supported policy fields, and Patchbay generates the per-project Codex config and rules.
 
@@ -88,6 +88,8 @@ When a selected project uses the current-branch workspace mode, the top bar shou
 Quick settings controls such as the top-bar Auto-Commit toggle should update optimistically in the hydrated UI and send the persistence request in the background. If the request fails, the control should roll back to its previous state instead of navigating or reloading the page.
 
 The board and run detail views should make workspaces directly reachable. Project-level actions use the configured project path; run-level actions use the recorded run working directory so Git worktree runs can be opened in the exact folder the agent edited. Editor opening is a server-local fixed allowlist for RustRover and VS Code; unavailable editors should not be shown, and browser requests must not accept arbitrary commands. The board workspace panel should state whether the project path is in a Git repository and, when it is, show the current branch plus added/deleted line counts.
+
+Automation rule administration should show and edit each work-consuming rule's mutability with `mutating` and `read_only` choices. Automation status should show total running runs plus separate mutating and read-only counts, and run list/detail views should display the persisted run mutability so historical logs remain understandable after a rule changes.
 
 ## Live Updates
 
