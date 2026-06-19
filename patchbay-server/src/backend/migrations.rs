@@ -119,6 +119,17 @@ enum WorkItemStates {
 }
 
 #[derive(DeriveIden)]
+enum Personalities {
+    Table,
+    Id,
+    ProjectId,
+    Name,
+    PersonalityDescription,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 enum Comments {
     Table,
     Id,
@@ -326,6 +337,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddFeedbackRequestWorkflow),
             Box::new(AddAutomationRunMutability),
             Box::new(AddWorkItemRelationships),
+            Box::new(AddAutomationPersonalities),
         ]
     }
 }
@@ -2616,6 +2628,164 @@ impl MigrationTrait for AddWorkItemRelationships {
     }
 }
 
+struct AddAutomationPersonalities;
+
+impl MigrationName for AddAutomationPersonalities {
+    fn name(&self) -> &str {
+        "m20260619_000036_add_automation_personalities"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAutomationPersonalities {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "automation_triggers_read_view").await?;
+        create_personalities(manager).await?;
+        add_column_if_missing(manager, "automation_triggers", "personality_id", "BIGINT").await?;
+        seed_default_personalities(manager).await?;
+        backfill_automation_personalities(manager).await?;
+        create_read_view(manager, "personalities", "personalities_read_view").await?;
+        create_automation_triggers_read_view(manager).await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        drop_read_view(manager, "automation_triggers_read_view").await?;
+        drop_read_view(manager, "personalities_read_view").await?;
+        drop_column_if_present(manager, "automation_triggers", "personality_id").await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(Personalities::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        create_read_view(
+            manager,
+            "automation_triggers",
+            "automation_triggers_read_view",
+        )
+        .await
+    }
+}
+
+async fn create_personalities(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(Personalities::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(Personalities::Id)
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Personalities::ProjectId)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(Personalities::Name).string().not_null())
+                .col(
+                    ColumnDef::new(Personalities::PersonalityDescription)
+                        .text()
+                        .not_null()
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Personalities::CreatedAt)
+                        .string()
+                        .not_null()
+                        .default(Expr::current_timestamp()),
+                )
+                .col(
+                    ColumnDef::new(Personalities::UpdatedAt)
+                        .string()
+                        .not_null()
+                        .default(Expr::current_timestamp()),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_personalities_project_id")
+                        .from(Personalities::Table, Personalities::ProjectId)
+                        .to(Projects::Table, Projects::Id)
+                        .on_delete(ForeignKeyAction::Cascade),
+                )
+                .to_owned(),
+        )
+        .await?;
+
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_personalities_project_name_unique")
+                .table(Personalities::Table)
+                .col(Personalities::ProjectId)
+                .col(Personalities::Name)
+                .unique()
+                .if_not_exists()
+                .to_owned(),
+        )
+        .await
+}
+
+async fn seed_default_personalities(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .get_connection()
+        .execute(Statement::from_string(
+            manager.get_database_backend(),
+            r#"
+            INSERT INTO "personalities"
+                (
+                    "project_id",
+                    "name",
+                    "personality_description",
+                    "created_at",
+                    "updated_at"
+                )
+            SELECT
+                "projects"."id",
+                'Default',
+                '',
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            FROM "projects"
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM "personalities"
+                WHERE "personalities"."project_id" = "projects"."id"
+                  AND "personalities"."name" = 'Default'
+            );
+            "#,
+        ))
+        .await
+        .map(|_| ())
+}
+
+async fn backfill_automation_personalities(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .get_connection()
+        .execute(Statement::from_string(
+            manager.get_database_backend(),
+            r#"
+            UPDATE "automation_triggers"
+            SET "personality_id" = (
+                    SELECT "personalities"."id"
+                    FROM "personalities"
+                    WHERE "personalities"."project_id" = "automation_triggers"."project_id"
+                      AND "personalities"."name" = 'Default'
+                    LIMIT 1
+                ),
+                "updated_at" = CURRENT_TIMESTAMP
+            WHERE "personality_id" IS NULL;
+            "#,
+        ))
+        .await
+        .map(|_| ())
+}
+
 async fn create_work_item_relationships(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .create_table(
@@ -3400,6 +3570,28 @@ async fn create_work_items_read_view(manager: &SchemaManager<'_>) -> Result<(), 
                 ) AS "state_label",
                 0 AS "has_validation_errors"
             FROM "work_items";
+            "#,
+        ))
+        .await
+        .map(|_| ())
+}
+
+async fn create_automation_triggers_read_view(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    drop_read_view(manager, "automation_triggers_read_view").await?;
+    manager
+        .get_connection()
+        .execute(Statement::from_string(
+            manager.get_database_backend(),
+            r#"
+            CREATE VIEW "automation_triggers_read_view" AS
+            SELECT
+                "automation_triggers".*,
+                "personalities"."name" AS "personality_name",
+                0 AS "has_validation_errors"
+            FROM "automation_triggers"
+            LEFT JOIN "personalities"
+              ON "personalities"."id" = "automation_triggers"."personality_id"
+             AND "personalities"."project_id" = "automation_triggers"."project_id";
             "#,
         ))
         .await

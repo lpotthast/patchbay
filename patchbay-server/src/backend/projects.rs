@@ -21,7 +21,7 @@ use crate::{
             project::{self, Project, ProjectActiveModel, ProjectModel},
             work_item_event,
         },
-        events,
+        events, personalities,
         storage::{Store, utc_now},
         swim_lanes, work_item_events, work_item_states,
     },
@@ -256,6 +256,7 @@ pub async fn create_project(store: &Store, create: CreateProject) -> Result<Proj
         .insert(&txn)
         .await
         .context("failed to create project")?;
+    personalities::ensure_default_personality_in_conn(&txn, project.id).await?;
     work_item_states::ensure_default_work_item_states_in_conn(&txn, project.id).await?;
     swim_lanes::ensure_default_swim_lanes_in_conn(&txn, project.id).await?;
     automation_triggers::ensure_default_project_automations_in_conn(

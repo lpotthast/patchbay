@@ -16,10 +16,10 @@ use crate::{
     backend::{
         automation_triggers,
         entities::{
-            agent_run, agent_tool, automation_trigger, comment, project, swim_lane, work_item,
-            work_item_label, work_item_state,
+            agent_run, agent_tool, automation_trigger, comment, personality, project, swim_lane,
+            work_item, work_item_label, work_item_state,
         },
-        events, item_labels, projects,
+        events, item_labels, personalities, projects,
         storage::{Store, utc_now},
         swim_lanes, work_item_events, work_item_labels, work_item_states,
     },
@@ -38,6 +38,7 @@ pub enum CrudResources {
     AgentTool,
     AgentRun,
     AutomationTrigger,
+    Personality,
     SwimLane,
     WorkItemState,
 }
@@ -51,6 +52,7 @@ impl ResourceType for CrudResources {
             Self::AgentTool => "agent_tools",
             Self::AgentRun => "agent_runs",
             Self::AutomationTrigger => "automation_triggers",
+            Self::Personality => "personalities",
             Self::SwimLane => "swim_lanes",
             Self::WorkItemState => "work_item_states",
         }
@@ -157,6 +159,10 @@ impl CrudLifetime<CrudProjectResource> for ProjectLifetime {
         data: ProjectHookData,
     ) -> Result<ProjectHookData, HookError<Self::Error>> {
         refresh_crud_project_path_status(context, model).await?;
+        personalities::ensure_default_personality_for_project_id(&context.store, model.id)
+            .await
+            .map_err(|err| ProjectHookError(err.to_string()))
+            .map_err(HookError::Internal)?;
         work_item_states::ensure_default_work_item_states_for_project_id(&context.store, model.id)
             .await
             .map_err(|err| ProjectHookError(err.to_string()))
@@ -1089,6 +1095,208 @@ impl SeaOrmResource for CrudAgentRunResource {
 }
 
 #[derive(Clone)]
+pub struct PersonalityResourceContext {
+    store: Store,
+}
+
+impl fmt::Debug for PersonalityResourceContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PersonalityResourceContext")
+    }
+}
+
+impl CrudResourceContext for PersonalityResourceContext {}
+
+#[derive(Debug, Clone)]
+pub struct PersonalityHookError(String);
+
+impl fmt::Display for PersonalityHookError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PersonalityHookError {}
+
+#[derive(Debug)]
+pub struct PersonalityLifetime;
+
+impl CrudLifetime<CrudPersonalityResource> for PersonalityLifetime {
+    type Error = PersonalityHookError;
+
+    async fn before_read(
+        _read_request: &mut ReadRequest<CrudPersonalityResource>,
+        _context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        Ok(data)
+    }
+
+    async fn after_read(
+        _read_request: &ReadRequest<CrudPersonalityResource>,
+        _read_result: &mut ReadResult<CrudPersonalityResource>,
+        _context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        Ok(data)
+    }
+
+    async fn before_create(
+        create_model: &mut personality::CreateModel,
+        context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        create_model.name = personalities::normalize_name(std::mem::take(&mut create_model.name))
+            .map_err(|err| personality_unprocessable_error(err.to_string()))?;
+        create_model.personality_description = personalities::normalize_description(
+            std::mem::take(&mut create_model.personality_description),
+        );
+        personalities::ensure_personality_name_available(
+            &context.store,
+            create_model.project_id,
+            &create_model.name,
+            None,
+        )
+        .await
+        .map_err(|err| personality_unprocessable_error(err.to_string()))?;
+        Ok(data)
+    }
+
+    async fn after_create(
+        _create_model: &personality::CreateModel,
+        model: &personality::Model,
+        context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        publish_automation_project_event(&context.store, model.project_id).await;
+        Ok(data)
+    }
+
+    async fn before_update(
+        existing: &personality::Model,
+        update_model: &mut personality::UpdateModel,
+        _update_request: &UpdateRequest,
+        context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        update_model.name = personalities::normalize_name(std::mem::take(&mut update_model.name))
+            .map_err(|err| personality_unprocessable_error(err.to_string()))?;
+        update_model.personality_description = personalities::normalize_description(
+            std::mem::take(&mut update_model.personality_description),
+        );
+        personalities::ensure_personality_name_available(
+            &context.store,
+            existing.project_id,
+            &update_model.name,
+            Some(existing.id),
+        )
+        .await
+        .map_err(|err| personality_unprocessable_error(err.to_string()))?;
+        Ok(data)
+    }
+
+    async fn after_update(
+        _update_model: &personality::UpdateModel,
+        model: &personality::Model,
+        _update_request: &UpdateRequest,
+        context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        publish_automation_project_event(&context.store, model.project_id).await;
+        Ok(data)
+    }
+
+    async fn before_delete(
+        model: &personality::Model,
+        _delete_request: &DeleteRequest<CrudPersonalityResource>,
+        context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        personalities::validate_personality_delete(&context.store, model)
+            .await
+            .map_err(|err| personality_unprocessable_error(err.to_string()))?;
+        Ok(data)
+    }
+
+    async fn after_delete(
+        model: &personality::Model,
+        _delete_request: &DeleteRequest<CrudPersonalityResource>,
+        context: &PersonalityResourceContext,
+        _request: RequestContext<NoAuth>,
+        data: (),
+    ) -> Result<(), HookError<Self::Error>> {
+        publish_automation_project_event(&context.store, model.project_id).await;
+        Ok(data)
+    }
+}
+
+fn personality_unprocessable_error(reason: String) -> HookError<PersonalityHookError> {
+    HookError::UnprocessableEntity { reason }
+}
+
+#[derive(Debug, ToSchema)]
+pub struct CrudPersonalityResource;
+
+impl CrudResource for CrudPersonalityResource {
+    type ReadModel = personality::read_view::Model;
+    type ReadModelId = personality::read_view::ModelId;
+    type ReadModelField = personality::read_view::ModelField;
+
+    type CreateModel = personality::CreateModel;
+    type CreateModelField = personality::ModelField;
+
+    type UpdateModel = personality::UpdateModel;
+    type UpdateModelField = personality::ModelField;
+
+    type Model = personality::Model;
+    type Id = personality::PersonalityId;
+    type ModelField = personality::ModelField;
+
+    type Repository = SeaOrmRepo;
+    type ValidationResultRepository =
+        crudkit_sea_orm::validation::unified::repository::UnifiedValidationRepository;
+    type CollaborationService = NoopCollaborationService;
+    type Context = PersonalityResourceContext;
+    type HookData = ();
+    type Lifetime = PersonalityLifetime;
+    type Auth = NoAuth;
+    type AuthPolicy = OpenAuthPolicy;
+    type ResourceType = CrudResources;
+    const TYPE: CrudResources = CrudResources::Personality;
+}
+
+impl SeaOrmResource for CrudPersonalityResource {
+    type Entity = personality::Entity;
+    type SeaOrmModel = personality::Model;
+    type ActiveModel = personality::ActiveModel;
+    type Column = personality::Column;
+    type PrimaryKey = <personality::Entity as EntityTrait>::PrimaryKey;
+
+    type ReadViewEntity = personality::read_view::Entity;
+    type ReadViewSeaOrmModel = personality::read_view::Model;
+    type ReadViewActiveModel = personality::read_view::ActiveModel;
+    type ReadViewColumn = personality::read_view::Column;
+    type ReadViewPrimaryKey = <personality::read_view::Entity as EntityTrait>::PrimaryKey;
+
+    fn model_field_to_column(field: &Self::ModelField) -> Self::Column {
+        <personality::ModelField as CrudColumns<personality::Column>>::to_sea_orm_column(field)
+    }
+
+    fn read_model_field_to_column(field: &Self::ReadModelField) -> Self::ReadViewColumn {
+        <personality::read_view::ModelField as CrudColumns<
+            personality::read_view::Column,
+        >>::to_sea_orm_column(field)
+    }
+}
+
+#[derive(Clone)]
 pub struct AutomationTriggerResourceContext {
     store: Store,
 }
@@ -1159,6 +1367,13 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         create_model.work_item_selector =
             normalize_selector_storage(activation, create_model.work_item_selector.take())?;
         let selector = parse_work_item_selector(create_model.work_item_selector.as_deref())?;
+        create_model.personality_id = trigger_personality_id_for_effect(
+            context,
+            create_model.project_id,
+            effect,
+            create_model.personality_id,
+        )
+        .await?;
         validate_trigger_configuration(
             &create_model.name,
             activation,
@@ -1210,6 +1425,13 @@ impl CrudLifetime<CrudAutomationTriggerResource> for AutomationTriggerLifetime {
         update_model.work_item_selector =
             normalize_selector_storage(activation, update_model.work_item_selector.take())?;
         let selector = parse_work_item_selector(update_model.work_item_selector.as_deref())?;
+        update_model.personality_id = trigger_personality_id_for_effect(
+            context,
+            existing.project_id,
+            effect,
+            update_model.personality_id,
+        )
+        .await?;
         validate_trigger_configuration(
             &update_model.name,
             activation,
@@ -1349,6 +1571,27 @@ fn parse_mutability(
     value
         .parse::<AutomationRunMutability>()
         .map_err(|err| trigger_unprocessable_error(err.to_string()))
+}
+
+async fn trigger_personality_id_for_effect(
+    context: &AutomationTriggerResourceContext,
+    project_id: i64,
+    effect: AutomationEffect,
+    personality_id: Option<i64>,
+) -> Result<Option<i64>, HookError<AutomationTriggerHookError>> {
+    if effect != AutomationEffect::ConsumeWork {
+        return Ok(None);
+    }
+    let personality_id = match personality_id {
+        Some(personality_id) => personality_id,
+        None => personalities::default_personality_id(&context.store, project_id)
+            .await
+            .map_err(trigger_internal_error)?,
+    };
+    personalities::validate_personality_for_project(&context.store, project_id, personality_id)
+        .await
+        .map_err(|err| trigger_unprocessable_error(err.to_string()))?;
+    Ok(Some(personality_id))
 }
 
 fn validate_trigger_configuration(
@@ -1914,6 +2157,7 @@ pub struct CrudContexts {
     pub agent_tool: Arc<CrudContext<CrudAgentToolResource>>,
     pub agent_run: Arc<CrudContext<CrudAgentRunResource>>,
     pub automation_trigger: Arc<CrudContext<CrudAutomationTriggerResource>>,
+    pub personality: Arc<CrudContext<CrudPersonalityResource>>,
     pub swim_lane: Arc<CrudContext<CrudSwimLaneResource>>,
     pub work_item_state: Arc<CrudContext<CrudWorkItemStateResource>>,
 }
@@ -1978,6 +2222,17 @@ pub fn build_contexts(store: Store) -> CrudContexts {
         }),
         automation_trigger: Arc::new(CrudContext {
             res_context: Arc::new(AutomationTriggerResourceContext {
+                store: store.clone(),
+            }),
+            repository: repository.clone(),
+            validators: vec![],
+            resource_validators: vec![],
+            validation_result_repository: validation_result_repository.clone(),
+            collab_service: collab_service.clone(),
+            global_validation_state: Arc::new(GlobalValidationState::new()),
+        }),
+        personality: Arc::new(CrudContext {
+            res_context: Arc::new(PersonalityResourceContext {
                 store: store.clone(),
             }),
             repository: repository.clone(),

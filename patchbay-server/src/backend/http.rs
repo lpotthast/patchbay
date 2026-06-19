@@ -68,6 +68,10 @@ impl_add_crud_routes!(
     automation_trigger
 );
 impl_add_crud_routes!(
+    crate::backend::crudkit_resources::CrudPersonalityResource,
+    personality
+);
+impl_add_crud_routes!(
     crate::backend::crudkit_resources::CrudSwimLaneResource,
     swim_lane
 );
@@ -90,6 +94,7 @@ pub(crate) fn router(
     crud_router = axum_agent_tool_crud_routes::add_crud_routes("/api", crud_router);
     crud_router = axum_agent_run_crud_routes::add_crud_routes("/api", crud_router);
     crud_router = axum_automation_trigger_crud_routes::add_crud_routes("/api", crud_router);
+    crud_router = axum_personality_crud_routes::add_crud_routes("/api", crud_router);
     crud_router = axum_swim_lane_crud_routes::add_crud_routes("/api", crud_router);
     crud_router = axum_work_item_state_crud_routes::add_crud_routes("/api", crud_router);
 
@@ -310,6 +315,7 @@ pub(crate) fn router(
         .layer(Extension(contexts.agent_tool))
         .layer(Extension(contexts.agent_run))
         .layer(Extension(contexts.automation_trigger))
+        .layer(Extension(contexts.personality))
         .layer(Extension(contexts.swim_lane))
         .layer(Extension(contexts.work_item_state))
         .with_state(leptos_options)
@@ -957,6 +963,7 @@ async fn start_automation(
                 work_item_selector: None,
                 extra_prompt: form.prompt.filter(|value| !value.trim().is_empty()),
                 mutability,
+                personality_id: None,
                 trigger: None,
             },
             Some(state.sessions.clone()),
@@ -1047,6 +1054,7 @@ struct CreateAutomationTriggerForm {
     tool: Option<String>,
     #[serde(default = "default_automation_mutability")]
     mutability: String,
+    personality_id: Option<i64>,
     work_item_selector: Option<String>,
     priority: Option<i64>,
     prompt: Option<String>,
@@ -1092,6 +1100,7 @@ async fn create_automation_trigger(
             schedule: form.schedule,
             tool_name,
             mutability,
+            personality_id: form.personality_id,
             prompt: form.prompt.unwrap_or_default(),
             work_item_selector,
             priority: form.priority.unwrap_or_default(),
@@ -1129,6 +1138,7 @@ struct UpdateAutomationTriggerForm {
     schedule: String,
     #[serde(default = "default_automation_mutability")]
     mutability: String,
+    personality_id: Option<i64>,
     enabled: Option<String>,
     work_item_selector: Option<String>,
     priority: Option<i64>,
@@ -1168,6 +1178,7 @@ async fn update_automation_trigger(
             effect,
             schedule: form.schedule,
             mutability,
+            personality_id: form.personality_id,
             prompt: form.prompt.unwrap_or_default(),
             work_item_selector,
             priority: form.priority,

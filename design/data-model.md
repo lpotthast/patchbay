@@ -11,6 +11,7 @@ Project data includes:
 - stable name and display name;
 - filesystem path and path health metadata;
 - project system prompt and memory text;
+- reusable automation personalities;
 - workspace mode;
 - automation concurrency settings;
 - stale-claim timeout;
@@ -23,6 +24,10 @@ All item and automation API calls are project-scoped. Missing project context is
 The project system prompt is the project-owned instruction text included in automation prompts. Every project system prompt write creates a project-level `SystemPromptChanged` event with the full prompt snapshot after the write. System prompt events carry optional actor and agent-run attribution so a prompt change can be traced back to the Patchbay user or agent/session that wrote it.
 
 Project memory is the project-owned shared memory for agents. Every project memory write creates a project-level `MemoryChanged` event with the full memory snapshot after the write. Memory events carry optional actor and agent-run attribution so a memory change can be traced back to the Patchbay agent/session that wrote it.
+
+Project personalities are reusable, project-scoped prompt fragments for automation-launched agents. Every project has a `Default` personality with an initially empty `personality_description`. Personality names are required after trimming, unique within a project, and suitable for display in automation selectors. The `personality_description` field is free-form text and defaults to empty.
+
+Personalities are not global, do not replace the project system prompt or project memory, and are not per-work-item overrides. Deleting `Default` is rejected to preserve the project invariant. Deleting any other personality that is referenced by an automation rule is rejected unless a future explicit reassignment flow is added.
 
 ## Work Items
 
@@ -118,7 +123,9 @@ Supported effects are:
 - `produce_work`: creates a work item from the automation prompt and does not launch an agent;
 - `consume_work`: schedules an agent run for a matching work item.
 
-Automation records include enabled state, activation, effect, mutability, tool, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
+Automation records include enabled state, activation, effect, mutability, tool, selected personality, prompt, required schedule, priority, evaluation count, queued evaluation count, last and next evaluation metadata, and the last consumed event id when applicable. Work-consuming automation can include a CrudKit `Condition`-shaped work-item selector. Selector clauses use label keys as `column_name` values, so nested `All` and `Any` groups can model rules such as `state=open AND (bug OR severity=high)`. Patchbay implicitly excludes `patchbay:automation-blocked` from automation claims.
+
+Work-consuming automation references a personality in the same project. New consume-work rules default to the project `Default` personality when no personality is explicitly selected. Work-producing automation may store the column as null and does not use personality prompt injection. Server-side create and update paths validate that the selected personality exists in the automation rule's project.
 
 Work-consuming automation has an explicit run mutability:
 
@@ -136,6 +143,8 @@ Default project automation rules are ordinary editable records. Patchbay creates
 The refiner and verifier prompts instruct agents to update item title, description, comments, and labels, remove the triggering label when complete, and leave the underlying implementation work unfinished for later automation or humans.
 
 Migrations default existing automation triggers and existing agent runs to `mutating`. Patchbay must not infer `read_only` from trigger names, selectors, labels, or prompt text; operators opt existing custom automation into read-only behavior explicitly.
+
+Migrations create the `personalities` table for existing databases, seed one empty `Default` personality per project, and backfill existing automation rules to reference their project default. New project seeding creates the default personality before default automation rules so those rules can reference it.
 
 ## Settings
 

@@ -21,6 +21,7 @@ use crate::{
         },
         events, item_claims, item_labels,
         items::{self, CreateWorkItem},
+        personalities,
         process_sessions::ProcessSessionRegistry,
         projects,
         storage::{Store, utc_now},
@@ -90,6 +91,7 @@ pub struct CreateAutomationTrigger {
     pub schedule: String,
     pub tool_name: Option<AgentToolName>,
     pub mutability: AutomationRunMutability,
+    pub personality_id: Option<i64>,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
     pub priority: i64,
@@ -103,6 +105,7 @@ pub struct UpdateAutomationTrigger {
     pub effect: AutomationEffect,
     pub schedule: String,
     pub mutability: AutomationRunMutability,
+    pub personality_id: Option<i64>,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
     pub priority: Option<i64>,
@@ -140,6 +143,8 @@ pub async fn create_trigger(
         work_item_selector.as_ref(),
         &create.prompt,
     )?;
+    let personality_id =
+        personality_id_for_effect(store, project_id, create.effect, create.personality_id).await?;
     let next_evaluation_at = match create.activation {
         AutomationActivation::Manual => None,
         AutomationActivation::WorkItem => None,
@@ -168,6 +173,7 @@ pub async fn create_trigger(
         schedule: Set(schedule),
         tool_name: Set(tool_name.as_storage().to_owned()),
         mutability: Set(create.mutability.as_storage().to_owned()),
+        personality_id: Set(personality_id),
         prompt: Set(create.prompt),
         work_item_selector: Set(selector_to_storage(work_item_selector.as_ref())?),
         priority: Set(create.priority),
@@ -229,6 +235,8 @@ pub async fn update_trigger(
         work_item_selector.as_ref(),
         &update.prompt,
     )?;
+    let personality_id =
+        personality_id_for_effect(store, project_id, update.effect, update.personality_id).await?;
     let now = utc_now();
     let next_evaluation_at = match update.activation {
         AutomationActivation::Manual => None,
@@ -260,6 +268,7 @@ pub async fn update_trigger(
     active.effect = Set(update.effect.as_storage().to_owned());
     active.schedule = Set(schedule);
     active.mutability = Set(update.mutability.as_storage().to_owned());
+    active.personality_id = Set(personality_id);
     active.tool_name = Set(default_tool.as_storage().to_owned());
     active.prompt = Set(update.prompt);
     active.work_item_selector = Set(selector_to_storage(work_item_selector.as_ref())?);
@@ -792,6 +801,7 @@ async fn run_trigger_once(
             work_item_selector: view.work_item_selector.clone(),
             extra_prompt: Some(view.prompt.clone()),
             mutability: Some(view.mutability),
+            personality_id: view.personality_id,
             trigger: Some(AutomationTriggerOrigin {
                 trigger_id: view.id,
                 trigger_name: view.name.clone(),
@@ -1010,6 +1020,23 @@ pub(crate) fn default_work_item_selector_storage() -> Result<String> {
         .ok_or_else(|| report!("default work-item automation selector cannot be empty"))
 }
 
+async fn personality_id_for_effect(
+    store: &Store,
+    project_id: i64,
+    effect: AutomationEffect,
+    personality_id: Option<i64>,
+) -> Result<Option<i64>> {
+    if effect != AutomationEffect::ConsumeWork {
+        return Ok(None);
+    }
+    let personality_id = match personality_id {
+        Some(personality_id) => personality_id,
+        None => personalities::default_personality_id(store, project_id).await?,
+    };
+    personalities::validate_personality_for_project(store, project_id, personality_id).await?;
+    Ok(Some(personality_id))
+}
+
 fn default_project_automations() -> [DefaultProjectAutomation; 3] {
     [
         DefaultProjectAutomation {
@@ -1071,6 +1098,7 @@ where
     }
 
     let selector = (default.selector)();
+    let personality_id = personalities::default_personality_id_in_conn(conn, project_id).await?;
     let now = utc_now();
     AutomationTriggerActiveModel {
         project_id: Set(project_id),
@@ -1081,6 +1109,7 @@ where
         schedule: Set(DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned()),
         tool_name: Set(default_tool.to_owned()),
         mutability: Set(default.mutability.as_storage().to_owned()),
+        personality_id: Set(Some(personality_id)),
         prompt: Set(default.prompt.to_owned()),
         work_item_selector: Set(selector_to_storage(Some(&selector))?),
         priority: Set(default.priority),
@@ -1204,6 +1233,8 @@ fn model_to_view(trigger: AutomationTriggerModel) -> Result<AutomationTriggerVie
         schedule: trigger.schedule,
         tool_name: AgentToolName::from_str(&trigger.tool_name)?,
         mutability: AutomationRunMutability::from_str(&trigger.mutability)?,
+        personality_id: trigger.personality_id,
+        personality_name: None,
         prompt: trigger.prompt,
         work_item_selector: selector_from_storage(trigger.work_item_selector.as_deref())?,
         priority: trigger.priority,
@@ -1229,6 +1260,7 @@ mod tests {
         agent_tools::set_tool_path,
         item_label_service::add_label,
         items::{CreateWorkItem, create_item, get_item, item_matches_condition},
+        personalities,
         projects::{CreateProject, create_project},
     };
 
@@ -1341,6 +1373,10 @@ mod tests {
     #[tokio::test]
     async fn trigger_create_and_update_round_trip_mutability() {
         let (_temp, store) = test_store().await;
+        let default_personality = personalities::list_personalities(&store, "demo")
+            .await
+            .unwrap()[0]
+            .clone();
         let trigger = create_trigger(
             &store,
             "demo",
@@ -1352,6 +1388,7 @@ mod tests {
                 schedule: "@every 15s".to_owned(),
                 tool_name: None,
                 mutability: AutomationRunMutability::ReadOnly,
+                personality_id: None,
                 prompt: "Review metadata.".to_owned(),
                 work_item_selector: Some(default_work_item_selector()),
                 priority: 5,
@@ -1361,6 +1398,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(trigger.mutability, AutomationRunMutability::ReadOnly);
+        assert_eq!(trigger.personality_id, Some(default_personality.id));
         let updated = update_trigger(
             &store,
             "demo",
@@ -1372,6 +1410,7 @@ mod tests {
                 effect: AutomationEffect::ConsumeWork,
                 schedule: "@every 15s".to_owned(),
                 mutability: AutomationRunMutability::Mutating,
+                personality_id: None,
                 prompt: "Review and edit.".to_owned(),
                 work_item_selector: Some(default_work_item_selector()),
                 priority: Some(6),
@@ -1381,7 +1420,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(updated.mutability, AutomationRunMutability::Mutating);
+        assert_eq!(updated.personality_id, Some(default_personality.id));
         assert_eq!(updated.priority, 6);
+    }
+
+    #[tokio::test]
+    async fn trigger_rejects_cross_project_personality() {
+        let (temp, store) = test_store().await;
+        create_project(
+            &store,
+            CreateProject {
+                name: "other".to_owned(),
+                display_name: None,
+                path: temp.path().to_path_buf(),
+                default_agent_model: None,
+                default_agent_reasoning_effort: None,
+                system_prompt: None,
+                memory: None,
+            },
+        )
+        .await
+        .unwrap();
+        let other_default = personalities::list_personalities(&store, "other")
+            .await
+            .unwrap()[0]
+            .id;
+
+        let err = create_trigger(
+            &store,
+            "demo",
+            CreateAutomationTrigger {
+                name: "bad-personality".to_owned(),
+                enabled: true,
+                activation: AutomationActivation::WorkItem,
+                effect: AutomationEffect::ConsumeWork,
+                schedule: "@every 15s".to_owned(),
+                tool_name: None,
+                mutability: AutomationRunMutability::ReadOnly,
+                personality_id: Some(other_default),
+                prompt: "Review metadata.".to_owned(),
+                work_item_selector: Some(default_work_item_selector()),
+                priority: 5,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not exist in this project"));
     }
 
     #[tokio::test]
@@ -1531,6 +1616,8 @@ mod tests {
             schedule: DEFAULT_WORK_ITEM_AUTOMATION_SCHEDULE.to_owned(),
             tool_name: AgentToolName::Codex,
             mutability: AutomationRunMutability::Mutating,
+            personality_id: Some(1),
+            personality_name: Some(personalities::DEFAULT_PERSONALITY_NAME.to_owned()),
             prompt: String::new(),
             work_item_selector: Some(default_work_item_selector()),
             priority,
@@ -1559,6 +1646,7 @@ mod tests {
                 schedule: "@every 15s".to_owned(),
                 tool_name: None,
                 mutability: AutomationRunMutability::ReadOnly,
+                personality_id: None,
                 prompt: "Refine this new work item.".to_owned(),
                 work_item_selector: Some(default_work_item_selector()),
                 priority: 0,
@@ -1626,6 +1714,7 @@ mod tests {
                 schedule: "@every 15s".to_owned(),
                 tool_name: None,
                 mutability: AutomationRunMutability::Mutating,
+                personality_id: None,
                 prompt: "Perform an expensive deep review.".to_owned(),
                 work_item_selector: None,
                 priority: 100,
@@ -1688,6 +1777,7 @@ mod tests {
                 schedule: "@every 15s".to_owned(),
                 tool_name: None,
                 mutability: AutomationRunMutability::Mutating,
+                personality_id: None,
                 prompt: "Review work in the other project.".to_owned(),
                 work_item_selector: None,
                 priority: 100,

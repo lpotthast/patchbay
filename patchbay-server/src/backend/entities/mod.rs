@@ -2,6 +2,7 @@ pub mod agent_run;
 pub mod agent_tool;
 pub mod automation_trigger;
 pub mod comment;
+pub mod personality;
 pub mod project;
 pub mod swim_lane;
 pub mod work_item;

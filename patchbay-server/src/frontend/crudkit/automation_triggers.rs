@@ -52,6 +52,7 @@ pub(crate) fn automation_triggers_crudkit_instance(
     api_base_url: String,
     project: String,
     project_id: i64,
+    personalities: Vec<PersonalityView>,
     kind: AutomationTableKind,
     on_context_created: Callback<CrudInstanceContext>,
 ) -> impl IntoView + 'static {
@@ -68,7 +69,7 @@ pub(crate) fn automation_triggers_crudkit_instance(
     view! {
         <CrudInstance
             name=kind.instance_name()
-            config=automation_triggers_crudkit_config(api_base_url, project_id, kind)
+            config=automation_triggers_crudkit_config(api_base_url, project_id, personalities, kind)
             on_context_created=created
         />
     }
@@ -77,6 +78,7 @@ pub(crate) fn automation_triggers_crudkit_instance(
 fn automation_triggers_crudkit_config(
     api_base_url: String,
     project_id: i64,
+    personalities: Vec<PersonalityView>,
     kind: AutomationTableKind,
 ) -> CrudInstanceConfig {
     let mut list_columns = vec![
@@ -153,6 +155,16 @@ fn automation_triggers_crudkit_config(
         list_columns.insert(
             4,
             Header::showing(
+                ReadAutomationTriggerField::PersonalityName,
+                HeaderOptions {
+                    display_name: "Personality".into(),
+                    ..Default::default()
+                },
+            ),
+        );
+        list_columns.insert(
+            5,
+            Header::showing(
                 ReadAutomationTriggerField::Mutability,
                 HeaderOptions {
                     display_name: "Mutability".into(),
@@ -200,6 +212,13 @@ fn automation_triggers_crudkit_config(
         ),
     ];
     if matches!(kind, AutomationTableKind::Consuming) {
+        create_children.push(Elem::create_field(
+            CreateAutomationTriggerField::PersonalityId,
+            FieldOptions {
+                label: Some(Label::new("Personality")),
+                ..Default::default()
+            },
+        ));
         create_children.push(Elem::create_field(
             CreateAutomationTriggerField::Mutability,
             FieldOptions {
@@ -270,6 +289,13 @@ fn automation_triggers_crudkit_config(
     ];
     if matches!(kind, AutomationTableKind::Consuming) {
         update_children.push(Elem::field(
+            AutomationTriggerField::PersonalityId,
+            FieldOptions {
+                label: Some(Label::new("Personality")),
+                ..Default::default()
+            },
+        ));
+        update_children.push(Elem::field(
             AutomationTriggerField::Mutability,
             FieldOptions {
                 label: Some(Label::new("Mutability")),
@@ -312,7 +338,7 @@ fn automation_triggers_crudkit_config(
         base_condition: Some(automation_effect_condition(project_id, kind.effect())),
         resource_name: CrudAutomationTriggerResource::resource_name().to_owned(),
         reqwest_executor: Arc::new(NewClientPerRequestExecutor),
-        model_handler: automation_trigger_model_handler(project_id, kind),
+        model_handler: automation_trigger_model_handler(project_id, kind, &personalities),
         actions: vec![],
         entity_actions: vec![],
         navigation: CrudNavigationConfig::default(),
@@ -325,6 +351,10 @@ fn automation_triggers_crudkit_config(
             .register(
                 CreateAutomationTriggerField::Prompt,
                 rich_text_field_renderer::<DynCreateField>("Prompt"),
+            )
+            .register(
+                CreateAutomationTriggerField::PersonalityId,
+                personality_field_renderer::<DynCreateField>(personalities.clone()),
             )
             .register(
                 CreateAutomationTriggerField::Mutability,
@@ -344,6 +374,10 @@ fn automation_triggers_crudkit_config(
                 rich_text_field_renderer::<DynUpdateField>("Prompt"),
             )
             .register(
+                AutomationTriggerField::PersonalityId,
+                personality_field_renderer::<DynUpdateField>(personalities),
+            )
+            .register(
                 AutomationTriggerField::Mutability,
                 select_field_renderer::<DynUpdateField>(
                     &[("mutating", "mutating"), ("read_only", "read_only")],
@@ -354,14 +388,26 @@ fn automation_triggers_crudkit_config(
     }
 }
 
-fn automation_trigger_model_handler(project_id: i64, kind: AutomationTableKind) -> ModelHandler {
+fn automation_trigger_model_handler(
+    project_id: i64,
+    kind: AutomationTableKind,
+    personalities: &[PersonalityView],
+) -> ModelHandler {
     let mut handler =
         ModelHandler::new::<CreateAutomationTrigger, ReadAutomationTrigger, AutomationTrigger>();
+    let default_personality_id = personalities
+        .iter()
+        .find(|personality| personality.name == "Default")
+        .or_else(|| personalities.first())
+        .map(|personality| personality.id);
     handler.get_default_create_model = Callback::new(move |()| {
         DynCreateModel::from(CreateAutomationTrigger {
             project_id,
             activation: kind.default_activation().to_owned(),
             effect: kind.effect().to_owned(),
+            personality_id: matches!(kind, AutomationTableKind::Consuming)
+                .then_some(default_personality_id)
+                .flatten(),
             work_item_selector: kind.default_selector(),
             ..Default::default()
         })

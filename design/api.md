@@ -114,12 +114,15 @@ CrudKit-generated routes are mounted under `/api` for ordinary admin resources:
 - agent tools;
 - agent runs;
 - automation rules;
+- personalities;
 - work item states;
 - swim-lanes.
 
 CrudKit is not used for custom workflow authority. Admin CRUD can inspect and maintain records, but workflow transitions should use the custom endpoints so server services apply Patchbay rules consistently.
 
-Automation rule CRUD exposes the explicit run mutability for work-consuming rules. Create and update requests validate storage values `mutating` and `read_only`; new custom rules default to `mutating` unless the operator chooses read-only. Existing rules migrated from older schemas remain `mutating` until edited.
+Automation rule CRUD exposes the explicit run mutability and selected personality for work-consuming rules. Create and update requests validate storage values `mutating` and `read_only`; new custom rules default to `mutating` unless the operator chooses read-only. Consume-work create and update requests default a missing personality to the project `Default` personality and reject missing or cross-project personality references. Existing rules migrated from older schemas remain `mutating` until edited.
+
+Personality CRUD is project-scoped. Create and update requests trim and require `name`, keep `personality_description` as free-form text, and enforce unique names within a project. Delete requests reject `Default` and reject any personality referenced by an automation rule.
 
 ## UI Form Endpoints
 
@@ -136,6 +139,7 @@ The Leptos UI uses server form handlers for operator actions such as:
 - cleaning up worktrees;
 - opening workspace folders or fixed editor targets such as RustRover and VS Code;
 - creating, updating, deleting, and queueing evaluations for automation rules;
+- creating, updating, and deleting project personalities;
 - discovering agent tools;
 - picking folders on the local system.
 
@@ -165,6 +169,8 @@ API errors should be explicit enough for the CLI to show actionable output. Impo
 - automation tool unavailable;
 - read-only launch unsupported by the selected agent tool;
 - automation concurrency limit reached for the requested mutability;
+- missing or cross-project automation personality;
+- personality delete rejected because it is `Default` or still referenced by automation;
 - run log unavailable.
 
 The server should prefer structured error responses over plain text so CLI and future clients can distinguish user errors from server failures.

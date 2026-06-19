@@ -247,6 +247,86 @@ mod tests {
         assert_eq!(run.try_get::<String>("", "mutability").unwrap(), "mutating");
     }
 
+    #[tokio::test]
+    async fn personality_migration_seeds_defaults_and_backfills_triggers() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("patchbay.sqlite3");
+        let url = sqlite_url(&path);
+        let db = Database::connect(&url).await.unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys = ON".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let migration_count_before_personalities = Migrator::migrations()
+            .iter()
+            .position(|migration| {
+                migration.name() == "m20260619_000036_add_automation_personalities"
+            })
+            .unwrap() as u32;
+        Migrator::up(&db, Some(migration_count_before_personalities))
+            .await
+            .unwrap();
+        for statement in [
+            r#"INSERT INTO "projects" ("name", "display_name") VALUES ('demo', 'Demo');"#,
+            r#"INSERT INTO "automation_triggers" ("project_id", "name", "enabled", "activation", "effect", "schedule", "tool_name", "mutability") VALUES (1, 'Legacy trigger', 1, 'work_item', 'consume_work', '@every 15s', 'codex', 'mutating');"#,
+        ] {
+            db.execute(Statement::from_string(
+                DbBackend::Sqlite,
+                statement.to_owned(),
+            ))
+            .await
+            .unwrap();
+        }
+
+        Migrator::up(&db, None).await.unwrap();
+        let personality = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                r#"
+                SELECT "id", "personality_description"
+                FROM "personalities"
+                WHERE "project_id" = 1
+                  AND "name" = 'Default';
+                "#
+                .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let default_id: i64 = personality.try_get("", "id").unwrap();
+        assert_eq!(
+            personality
+                .try_get::<String>("", "personality_description")
+                .unwrap(),
+            ""
+        );
+
+        let trigger = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                r#"
+                SELECT "personality_id", "personality_name"
+                FROM "automation_triggers_read_view"
+                WHERE "id" = 1;
+                "#
+                .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            trigger.try_get::<i64>("", "personality_id").unwrap(),
+            default_id
+        );
+        assert_eq!(
+            trigger.try_get::<String>("", "personality_name").unwrap(),
+            "Default"
+        );
+    }
+
     #[test]
     fn migration_history_names_all_current_migrations() {
         let migrations = Migrator::migrations();
@@ -291,6 +371,7 @@ mod tests {
             "m20260618_000033_add_feedback_request_workflow",
             "m20260618_000034_add_automation_run_mutability",
             "m20260618_000035_add_work_item_relationships",
+            "m20260619_000036_add_automation_personalities",
         ];
 
         assert_eq!(names.as_slice(), expected.as_slice());

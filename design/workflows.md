@@ -85,6 +85,8 @@ When Patchbay launches an agent, it:
 7. omits `PATCHBAY_DATABASE`;
 8. omits database paths from the prompt.
 
+For work-consuming automation runs started from an automation rule, Patchbay resolves the rule's selected project-local personality before writing the prompt. If the personality description is non-empty, the generated prompt includes it as a `## Personality` section before the automation-specific trigger prompt. The empty `Default` personality is behavior-neutral and does not add a section. Work-producing automation and direct starts that do not launch from a personality-bearing consume-work rule do not need personality prompt injection.
+
 The prompt tells the agent:
 
 ```text
@@ -96,7 +98,7 @@ For the claimed item, omit project, agent, and item id arguments unless intentio
 
 ## Automation Rule Behavior
 
-Automation rules either produce work items or consume work items. Work-consuming automation has an explicit run mutability, either `mutating` or `read_only`. The rule prompt tells the launched agent how to handle the claimed item, including whether the expected outcome is implementation, refinement, verification, review preparation, or another project-specific workflow.
+Automation rules either produce work items or consume work items. Work-consuming automation has an explicit run mutability, either `mutating` or `read_only`, and a selected project-local personality. The rule prompt tells the launched agent how to handle the claimed item, including whether the expected outcome is implementation, refinement, verification, review preparation, or another project-specific workflow. The selected personality is a reusable prompt fragment injected before that trigger prompt.
 
 Queued automation evaluations are consumed only while automation is running for that project. If an operator queues an evaluation for a stopped project, the pending evaluation count remains on the trigger until the project automation loop is active again; another project's running automation must not consume it.
 

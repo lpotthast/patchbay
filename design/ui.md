@@ -55,6 +55,7 @@ CrudKit is appropriate for ordinary resource administration:
 - agent tools;
 - agent runs;
 - automation rules.
+- personalities.
 
 Patchbay-specific actions such as claim, release, finish, request feedback, automation launch, stale-claim recovery, and run-log viewing should remain custom UI flows. These actions carry workflow semantics that generic CRUD controls should not duplicate.
 
@@ -96,7 +97,7 @@ Quick settings controls such as the top-bar Auto-Commit toggle should update opt
 
 The board and run detail views should make workspaces directly reachable. Project-level actions use the configured project path; run-level actions use the recorded run working directory so Git worktree runs can be opened in the exact folder the agent edited. Editor opening is a server-local fixed allowlist for RustRover and VS Code; unavailable editors should not be shown, and browser requests must not accept arbitrary commands. The board workspace panel should state whether the project path is in a Git repository and, when it is, show the current branch plus added/deleted line counts.
 
-Automation rule administration should show and edit each work-consuming rule's mutability with `mutating` and `read_only` choices. Automation status should show total running runs plus separate mutating and read-only counts, and run list/detail views should display the persisted run mutability so historical logs remain understandable after a rule changes.
+Automation rule administration should show and edit each work-consuming rule's mutability with `mutating` and `read_only` choices and its selected project-local personality by name. Automation rule lists should show personality names rather than raw ids. Personality administration lives near automation administration as a normal project-scoped admin resource with create, edit, list, and delete controls. Personality descriptions are plain multiline prompt text. Deleting `Default` or any personality still referenced by automation should surface the server's clear rejection message. Automation status should show total running runs plus separate mutating and read-only counts, and run list/detail views should display the persisted run mutability so historical logs remain understandable after a rule changes.
 
 ## Live Updates
 

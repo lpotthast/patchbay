@@ -17,6 +17,7 @@ pub(crate) mod item_labels;
 pub(crate) mod items;
 pub(crate) mod migrations;
 pub(crate) mod page_data;
+pub(crate) mod personalities;
 pub(crate) mod process_sessions;
 pub(crate) mod projects;
 pub(crate) mod relationships;

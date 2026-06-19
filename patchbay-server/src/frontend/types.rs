@@ -14,6 +14,7 @@ pub mod automation_trigger {
         pub schedule: String,
         pub tool_name: String,
         pub mutability: String,
+        pub personality_id: Option<i64>,
         pub prompt: String,
         pub work_item_selector: Option<String>,
         pub priority: i64,
@@ -30,6 +31,7 @@ pub mod automation_trigger {
         pub schedule: String,
         pub tool_name: String,
         pub mutability: String,
+        pub personality_id: Option<i64>,
         pub prompt: String,
         pub work_item_selector: Option<String>,
         pub priority: i64,
@@ -46,6 +48,7 @@ pub mod automation_trigger {
                 schedule: "@every 10s".to_owned(),
                 tool_name: "codex".to_owned(),
                 mutability: "mutating".to_owned(),
+                personality_id: None,
                 prompt: String::new(),
                 work_item_selector: Some(
                     r#"{"All":[{"column_name":"state","operator":"=","value":{"String":"open"}},{"column_name":"needs-refinement","operator":"=","value":{"Bool":false}},{"column_name":"needs-verification","operator":"=","value":{"Bool":false}}]}"#
@@ -68,6 +71,8 @@ pub mod automation_trigger {
         pub schedule: String,
         pub tool_name: String,
         pub mutability: String,
+        pub personality_id: Option<i64>,
+        pub personality_name: Option<String>,
         pub prompt: String,
         pub work_item_selector: Option<String>,
         pub priority: i64,
@@ -92,6 +97,7 @@ pub mod automation_trigger {
                 schedule: read.schedule,
                 tool_name: read.tool_name,
                 mutability: read.mutability,
+                personality_id: read.personality_id,
                 prompt: read.prompt,
                 work_item_selector: read.work_item_selector,
                 priority: read.priority,
@@ -147,6 +153,56 @@ pub mod agent_tool {
     }
 
     impl ErasedIdentifiable for CreateAgentTool {
+        fn id(&self) -> SerializableId {
+            panic!("create models are not identifiable")
+        }
+    }
+}
+
+pub mod personality {
+    use crudkit_leptos::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, PartialEq, Eq, Debug, CkId, CkField, CkResource, Serialize, Deserialize)]
+    #[ck_resource(resource_name = "personalities")]
+    #[ck_field(model = ModelType::Update)]
+    pub struct Personality {
+        pub id: i64,
+        pub name: String,
+        pub personality_description: String,
+    }
+
+    #[derive(Clone, PartialEq, Eq, Debug, Default, CkField, Serialize, Deserialize)]
+    #[ck_field(model = ModelType::Create)]
+    pub struct CreatePersonality {
+        pub project_id: i64,
+        pub name: String,
+        pub personality_description: String,
+    }
+
+    #[derive(Clone, PartialEq, Eq, Debug, CkId, CkField, Serialize, Deserialize)]
+    #[ck_field(model = ModelType::Read)]
+    pub struct ReadPersonality {
+        pub id: i64,
+        pub project_id: i64,
+        pub name: String,
+        pub personality_description: String,
+        pub created_at: String,
+        pub updated_at: String,
+        pub has_validation_errors: bool,
+    }
+
+    impl From<ReadPersonality> for Personality {
+        fn from(read: ReadPersonality) -> Self {
+            Self {
+                id: read.id,
+                name: read.name,
+                personality_description: read.personality_description,
+            }
+        }
+    }
+
+    impl ErasedIdentifiable for CreatePersonality {
         fn id(&self) -> SerializableId {
             panic!("create models are not identifiable")
         }

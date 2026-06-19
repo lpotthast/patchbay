@@ -17,6 +17,10 @@ use crate::{
                 CreateAutomationTriggerField, CrudAutomationTriggerResource, ReadAutomationTrigger,
                 ReadAutomationTriggerField,
             },
+            personality::{
+                CreatePersonality, CreatePersonalityField, CrudPersonalityResource, Personality,
+                PersonalityField, ReadPersonality, ReadPersonalityField,
+            },
             project::{
                 CreateProject, CreateProjectField, CrudProjectResource, Project as CrudProject,
                 ProjectField, ReadProject, ReadProjectField,
@@ -37,8 +41,8 @@ use crate::{
         work_item_creation::CreateItemStateOption,
     },
     shared::view_models::{
-        AgentReasoningEffort, CodexAgentModel, DEFAULT_STATE_LABEL, ProjectLabelView,
-        STATE_LABEL_KEY, UiEvent,
+        AgentReasoningEffort, CodexAgentModel, DEFAULT_STATE_LABEL, PersonalityView,
+        ProjectLabelView, STATE_LABEL_KEY, UiEvent,
     },
 };
 use crudkit_leptos::crud_instance::CrudInstanceContext;
@@ -68,6 +72,7 @@ use serde::Deserialize;
 
 mod agent_tools;
 mod automation_triggers;
+mod personalities;
 mod projects;
 mod swim_lane_filter;
 mod swim_lanes;
@@ -76,6 +81,7 @@ mod work_items;
 
 pub(crate) use agent_tools::agent_tools_panel;
 pub(crate) use automation_triggers::{AutomationTableKind, automation_triggers_crudkit_instance};
+pub(crate) use personalities::PersonalitiesPanel;
 pub(crate) use projects::projects_panel;
 pub(crate) use swim_lanes::SwimLanesPanel;
 pub(crate) use work_item_states::WorkItemStatesPanel;
@@ -510,6 +516,84 @@ fn select_field_renderer<F: TypeErasedField>(
             }
         },
     )
+}
+
+fn personality_field_renderer<F: TypeErasedField>(
+    personalities: Vec<PersonalityView>,
+) -> FieldRenderer<F> {
+    FieldRenderer::new(
+        move |_signals, _field: F, field_mode, field_options, value, value_changed| {
+            let personalities = personalities.clone();
+            let current = Signal::derive(move || value_to_optional_i64(&value.value.get()));
+
+            match field_mode {
+                FieldMode::Display => view! {
+                    {move || {
+                        let current = current.get();
+                        current
+                            .and_then(|id| {
+                                personalities
+                                    .iter()
+                                    .find(|personality| personality.id == id)
+                                    .map(|personality| personality.name.clone())
+                            })
+                            .unwrap_or_else(|| "Default".to_owned())
+                    }}
+                }
+                .into_any(),
+                FieldMode::Readable | FieldMode::Editable => {
+                    let disabled = field_mode != FieldMode::Editable || field_options.disabled;
+                    let options = personalities
+                        .iter()
+                        .map(|personality| {
+                            let id = personality.id.to_string();
+                            let name = personality.name.clone();
+                            view! { <option value=id>{name}</option> }
+                        })
+                        .collect::<Vec<_>>();
+                    view! {
+                        {render_label(field_options.label.clone())}
+                        <select
+                            class="crud-input-field"
+                            prop:value=move || {
+                                current
+                                    .get()
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_default()
+                            }
+                            disabled=disabled
+                            on:change=move |event| {
+                                let selected = event_target_value(&event);
+                                match selected.parse::<i64>() {
+                                    Ok(id) => value_changed.run(Ok(Value::I64(id))),
+                                    Err(_) => value_changed.run(Ok(Value::Null)),
+                                }
+                            }
+                        >
+                            {options}
+                        </select>
+                    }
+                    .into_any()
+                }
+            }
+        },
+    )
+}
+
+fn value_to_optional_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::I64(value) => Some(*value),
+        Value::I32(value) => Some(i64::from(*value)),
+        Value::I16(value) => Some(i64::from(*value)),
+        Value::I8(value) => Some(i64::from(*value)),
+        Value::U64(value) => i64::try_from(*value).ok(),
+        Value::U32(value) => Some(i64::from(*value)),
+        Value::U16(value) => Some(i64::from(*value)),
+        Value::U8(value) => Some(i64::from(*value)),
+        Value::String(value) => value.parse::<i64>().ok(),
+        Value::Null | Value::Void(()) => None,
+        _ => None,
+    }
 }
 
 fn swim_lane_order_field_renderer<F: TypeErasedField>() -> FieldRenderer<F> {

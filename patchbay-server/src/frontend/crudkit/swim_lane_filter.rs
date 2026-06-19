@@ -463,10 +463,10 @@ fn filter_clause_view(
                     on:input=move |event| {
                         let next_values = split_list_values(&event_target_value(&event));
                         update_filter_draft(context, |draft| {
-                            if let Some(clause) = filter_clause_mut(draft, &path_for_values, index) {
-                                if let FilterClauseMode::IsIn { values } = &mut clause.mode {
-                                    *values = next_values;
-                                }
+                            if let Some(clause) = filter_clause_mut(draft, &path_for_values, index)
+                                && let FilterClauseMode::IsIn { values } = &mut clause.mode
+                            {
+                                *values = next_values;
                             }
                         });
                     }

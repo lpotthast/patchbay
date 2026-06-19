@@ -5,9 +5,9 @@ use crate::backend::{app_state, page_data};
 use crate::{
     frontend::{
         crudkit::{
-            AutomationTableKind, SwimLanesPanel, WorkItemStatesPanel, WorkItemsPanel,
-            agent_tools_panel, automation_triggers_crudkit_instance, projects_panel,
-            selected_trigger_id_from_context, work_items_crudkit_config_for_view,
+            AutomationTableKind, PersonalitiesPanel, SwimLanesPanel, WorkItemStatesPanel,
+            WorkItemsPanel, agent_tools_panel, automation_triggers_crudkit_instance,
+            projects_panel, selected_trigger_id_from_context, work_items_crudkit_config_for_view,
         },
         item_detail,
         live_events::{
@@ -28,7 +28,7 @@ use crate::{
         AgentRunOutputKind, AgentRunOutputPiece, AgentRunStatus, AgentRunTokenUsageView,
         AgentRunView, AutomationStatusView, CLAIMED_FROM_STATE_LABEL_KEY, CodexAppServerStatusView,
         CodexAuthSetupView, CodexRateLimitView, CodexUsageSummaryView, CommentView,
-        FEEDBACK_REQUESTED_LABEL_KEY, ProjectGitStatusView, ProjectLabelView,
+        FEEDBACK_REQUESTED_LABEL_KEY, PersonalityView, ProjectGitStatusView, ProjectLabelView,
         ProjectMemoryEventRefView, ProjectMemoryEventView, ProjectSettingsView,
         ProjectSystemPromptEventView, ProjectView, RevertStrategy, RunLogView, STATE_LABEL_KEY,
         SwimLaneView, WorkItemClaimSourceView, WorkItemRelationshipListEntry, WorkItemStateView,
@@ -176,6 +176,7 @@ pub struct TriggersPage {
     pub active_project_names: Vec<String>,
     pub selected_project: Option<String>,
     pub selected_project_view: Option<ProjectView>,
+    pub personalities: Vec<PersonalityView>,
     pub workspace_editors: Vec<WorkspaceEditorView>,
     pub api_base_url: String,
     pub codex_status: CodexAppServerStatusView,
@@ -1410,6 +1411,7 @@ fn triggers_content(page: TriggersPage) -> AnyView {
         active_project_names,
         selected_project,
         selected_project_view,
+        personalities,
         workspace_editors,
         api_base_url,
         codex_status,
@@ -1440,13 +1442,15 @@ fn triggers_content(page: TriggersPage) -> AnyView {
             api_base_url.clone(),
             project.clone(),
             project_view.id,
+            personalities.clone(),
             AutomationTableKind::Consuming,
             Callback::new(move |context| set_consumer_context.set(Some(context))),
         );
         let producing_triggers = automation_triggers_crudkit_instance(
-            api_base_url,
+            api_base_url.clone(),
             project.clone(),
             project_view.id,
+            Vec::new(),
             AutomationTableKind::Producing,
             Callback::new(move |context| set_producer_context.set(Some(context))),
         );
@@ -1462,6 +1466,11 @@ fn triggers_content(page: TriggersPage) -> AnyView {
                     <section class="page-heading">
                         <h1>"Automation"</h1>
                     </section>
+                    <PersonalitiesPanel
+                        api_base_url=api_base_url
+                        project=project.clone()
+                        project_id=project_view.id
+                    />
                     <section class="automation-triggers panel">
                         <div class="panel-heading">
                             <h2>"Work-consuming automations"</h2>

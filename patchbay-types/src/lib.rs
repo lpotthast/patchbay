@@ -204,6 +204,16 @@ pub struct ProjectSystemPromptCompactionView {
     pub deleted_events: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PersonalityView {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    pub personality_description: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolName {
@@ -1281,6 +1291,8 @@ pub struct AutomationTriggerView {
     pub schedule: String,
     pub tool_name: AgentToolName,
     pub mutability: AutomationRunMutability,
+    pub personality_id: Option<i64>,
+    pub personality_name: Option<String>,
     pub prompt: String,
     pub work_item_selector: Option<Condition>,
     pub priority: i64,

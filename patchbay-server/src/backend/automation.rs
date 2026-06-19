@@ -30,7 +30,7 @@ use crate::{
     backend::{
         agent_ids, agent_tools, codex_app_server,
         entities::agent_run::{self, AgentRun, AgentRunActiveModel, AgentRunModel},
-        events, item_claims, items,
+        events, item_claims, items, personalities,
         process_sessions::{ProcessSessionRegistry, ProcessSessionStart},
         projects,
         storage::{Store, utc_now},
@@ -71,6 +71,7 @@ pub struct StartAutomation {
     pub work_item_selector: Option<Condition>,
     pub extra_prompt: Option<String>,
     pub mutability: Option<AutomationRunMutability>,
+    pub personality_id: Option<i64>,
     pub trigger: Option<AutomationTriggerOrigin>,
 }
 
@@ -111,6 +112,7 @@ struct PromptContext<'a> {
     memory_event_id: Option<i64>,
     item: Option<&'a WorkItemView>,
     agent_id: &'a str,
+    personality_description: Option<&'a str>,
     extra_prompt: Option<&'a str>,
     mutability: AutomationRunMutability,
     workspace_mode: WorkspaceMode,
@@ -731,6 +733,26 @@ async fn complete_started_automation_run(
             .await;
         }
     };
+    let personality_description = match personalities::personality_description_for_prompt(
+        store,
+        project.id,
+        start.personality_id,
+    )
+    .await
+    {
+        Ok(personality_description) => personality_description,
+        Err(err) => {
+            return fail_run_after_claim(
+                store,
+                &project_name,
+                run,
+                claimed_item.as_ref(),
+                &agent_id,
+                format!("Failed to resolve automation personality: {err:#}"),
+            )
+            .await;
+        }
+    };
     let prompt = build_prompt(PromptContext {
         project_name: &project_name,
         system_prompt: &project.system_prompt,
@@ -738,6 +760,7 @@ async fn complete_started_automation_run(
         memory_event_id,
         item: claimed_item.as_ref(),
         agent_id: &agent_id,
+        personality_description: personality_description.as_deref(),
         extra_prompt: start.extra_prompt.as_deref(),
         mutability: run_mutability,
         workspace_mode: settings.workspace_mode,
@@ -3045,6 +3068,14 @@ fn build_prompt(context: PromptContext<'_>) -> String {
         prompt.push_str(context.commit_standard.trim());
         prompt.push_str("\n\n");
     }
+    if let Some(personality_description) = context
+        .personality_description
+        .filter(|value| !value.trim().is_empty())
+    {
+        prompt.push_str("## Personality\n\n");
+        prompt.push_str(personality_description);
+        prompt.push_str("\n\n");
+    }
     if let Some(extra_prompt) = context
         .extra_prompt
         .filter(|value| !value.trim().is_empty())
@@ -4244,6 +4275,7 @@ mod tests {
             memory_event_id: Some(7),
             item: Some(&item),
             agent_id: "patchbay-run-1",
+            personality_description: None,
             extra_prompt: None,
             mutability: AutomationRunMutability::Mutating,
             workspace_mode: WorkspaceMode::CurrentBranch,
@@ -4320,6 +4352,7 @@ mod tests {
             memory_event_id: None,
             item: None,
             agent_id: "patchbay-run-1",
+            personality_description: None,
             extra_prompt: None,
             mutability: AutomationRunMutability::Mutating,
             workspace_mode: WorkspaceMode::GitWorktree,
@@ -4351,6 +4384,7 @@ mod tests {
             memory_event_id: None,
             item: None,
             agent_id: "patchbay-run-1",
+            personality_description: None,
             extra_prompt: Some("Inspect the item and update labels."),
             mutability: AutomationRunMutability::ReadOnly,
             workspace_mode: WorkspaceMode::GitWorktree,
@@ -4371,6 +4405,54 @@ mod tests {
         assert!(!prompt.contains("create a git commit before calling"));
         assert!(!prompt.contains("Patchbay will also attempt `gh pr create --fill`"));
         assert!(prompt.contains("Inspect the item and update labels."));
+    }
+
+    #[test]
+    fn prompt_includes_non_empty_personality_before_trigger_prompt() {
+        let prompt = build_prompt(PromptContext {
+            project_name: "demo",
+            system_prompt: "",
+            memory: "",
+            memory_event_id: None,
+            item: None,
+            agent_id: "patchbay-run-1",
+            personality_description: Some("Be concise and skeptical."),
+            extra_prompt: Some("Inspect the item and update labels."),
+            mutability: AutomationRunMutability::ReadOnly,
+            workspace_mode: WorkspaceMode::CurrentBranch,
+            auto_commit: false,
+            commit_standard: "",
+            revert_strategy: RevertStrategy::Manual,
+            create_pr: false,
+            agent_git_command_policy: &Default::default(),
+        });
+
+        assert!(prompt.contains("## Personality\n\nBe concise and skeptical.\n\n"));
+        assert!(prompt.find("## Personality").unwrap() < prompt.find("## Trigger Prompt").unwrap());
+    }
+
+    #[test]
+    fn empty_personality_description_is_behavior_neutral() {
+        let prompt = build_prompt(PromptContext {
+            project_name: "demo",
+            system_prompt: "",
+            memory: "",
+            memory_event_id: None,
+            item: None,
+            agent_id: "patchbay-run-1",
+            personality_description: Some("   "),
+            extra_prompt: Some("Inspect the item and update labels."),
+            mutability: AutomationRunMutability::ReadOnly,
+            workspace_mode: WorkspaceMode::CurrentBranch,
+            auto_commit: false,
+            commit_standard: "",
+            revert_strategy: RevertStrategy::Manual,
+            create_pr: false,
+            agent_git_command_policy: &Default::default(),
+        });
+
+        assert!(!prompt.contains("## Personality"));
+        assert!(prompt.contains("## Trigger Prompt"));
     }
 
     #[test]

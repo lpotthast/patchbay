@@ -5,8 +5,8 @@ use rootcause::Result;
 use crate::{
     backend::{
         automation, automation_controller::AutomationController, codex_app_server, comments,
-        item_label_service, items, process_sessions::ProcessSessionRegistry, projects,
-        relationships, storage::Store, swim_lanes, work_item_states, workspace,
+        item_label_service, items, personalities, process_sessions::ProcessSessionRegistry,
+        projects, relationships, storage::Store, swim_lanes, work_item_states, workspace,
     },
     frontend::{
         ApiDocsPage, BoardItemsSection, BoardPage, BoardRunSessionView, CodexStatusPage, ItemPage,
@@ -342,12 +342,21 @@ pub(crate) async fn triggers_page_data(
         .as_deref()
         .and_then(|project| projects.iter().find(|candidate| candidate.name == project))
         .cloned();
+    let project_personalities = if let Some(project) = selected_project_view
+        .as_ref()
+        .map(|project| project.name.as_str())
+    {
+        personalities::list_personalities(store, project).await?
+    } else {
+        Vec::new()
+    };
 
     Ok(TriggersPage {
         projects,
         active_project_names,
         selected_project,
         selected_project_view,
+        personalities: project_personalities,
         workspace_editors: workspace::available_workspace_editors(),
         api_base_url,
         codex_status,
