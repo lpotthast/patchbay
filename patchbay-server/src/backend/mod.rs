@@ -1,3 +1,4 @@
+pub(crate) mod active_claims;
 pub(crate) mod agent_ids;
 pub(crate) mod agent_tools;
 pub(crate) mod api;
@@ -7,6 +8,7 @@ pub(crate) mod automation_commit;
 pub(crate) mod automation_controller;
 pub(crate) mod automation_output;
 pub(crate) mod automation_triggers;
+pub(crate) mod claim_returns;
 pub(crate) mod claim_selection;
 pub(crate) mod codex_app_server;
 pub(crate) mod comments;

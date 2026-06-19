@@ -8,10 +8,10 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     backend::{
-        claim_selection,
+        active_claims, agent_ids, claim_returns, claim_selection,
         entities::{
             comment::CommentModel,
-            work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
+            work_item::{self, WorkItem, WorkItemModel},
         },
         events, projects,
         storage::{Store, utc_now},
@@ -19,115 +19,6 @@ use crate::{
     },
     shared::view_models::{AuthorType, CommentView, RecoveredClaimView, WorkItemView},
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReleaseAutomationDisposition {
-    Claimable,
-    Blocked,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ClaimReturnMode<'a> {
-    Release {
-        comment: Option<&'a str>,
-        automation_disposition: ReleaseAutomationDisposition,
-    },
-    FeedbackRequest {
-        body: &'a str,
-    },
-}
-
-impl ClaimReturnMode<'_> {
-    fn agent_comment_body(&self) -> Option<&str> {
-        match self {
-            Self::Release { comment, .. } => *comment,
-            Self::FeedbackRequest { body } => Some(*body),
-        }
-    }
-
-    fn label_disposition(&self) -> workflow_labels::ClaimReturnLabelDisposition {
-        match self {
-            Self::Release {
-                automation_disposition,
-                ..
-            } => match automation_disposition {
-                ReleaseAutomationDisposition::Claimable => {
-                    workflow_labels::ClaimReturnLabelDisposition::ClaimableRelease
-                }
-                ReleaseAutomationDisposition::Blocked => {
-                    workflow_labels::ClaimReturnLabelDisposition::BlockedRelease
-                }
-            },
-            Self::FeedbackRequest { .. } => {
-                workflow_labels::ClaimReturnLabelDisposition::FeedbackRequest
-            }
-        }
-    }
-
-    fn update_context(&self) -> &'static str {
-        match self {
-            Self::Release { .. } => "failed to release work item",
-            Self::FeedbackRequest { .. } => "failed to request item feedback",
-        }
-    }
-
-    fn start_context(&self) -> &'static str {
-        match self {
-            Self::Release { .. } => "failed to start item release",
-            Self::FeedbackRequest { .. } => "failed to start feedback request",
-        }
-    }
-
-    fn event_type(&self) -> &'static str {
-        match self {
-            Self::Release { .. } => "item_released",
-            Self::FeedbackRequest { .. } => "feedback_requested",
-        }
-    }
-
-    fn event_body(&self, agent_id: &str, release_state: &str) -> String {
-        match self {
-            Self::Release { .. } => {
-                format!("Released by {agent_id}; restored state to {release_state}")
-            }
-            Self::FeedbackRequest { .. } => {
-                format!("Feedback requested by {agent_id}; restored state to {release_state}")
-            }
-        }
-    }
-
-    fn commit_context(&self) -> &'static str {
-        match self {
-            Self::Release { .. } => "failed to commit item release",
-            Self::FeedbackRequest { .. } => "failed to commit feedback request",
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ActiveClaim {
-    item: WorkItemModel,
-}
-
-impl ActiveClaim {
-    fn touch_active_model(&self, updated_at: String) -> WorkItemActiveModel {
-        let mut active: WorkItemActiveModel = self.item.clone().into();
-        active.version = Set(self.item.version + 1);
-        active.updated_at = Set(updated_at);
-        active
-    }
-
-    fn clear_active_model(self, updated_at: String) -> WorkItemActiveModel {
-        let version = self.item.version;
-        let mut active: WorkItemActiveModel = self.item.into();
-        active.claimed_by = Set(None);
-        active.claimed_at = Set(None);
-        active.claim_expires_at = Set(None);
-        active.version = Set(version + 1);
-        active.updated_at = Set(updated_at);
-        active
-    }
-}
 
 pub async fn has_claimable_item_matching_condition(
     store: &Store,
@@ -145,7 +36,7 @@ pub async fn claim_item(
     agent_id: &str,
     state_filter: &str,
 ) -> Result<Option<WorkItemView>> {
-    validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
     let selector = claim_selection::ClaimSelector::state(state_filter)?;
 
     let project_id = projects::project_id(store, project_name).await?;
@@ -172,7 +63,7 @@ pub async fn claim_item_matching_condition(
     agent_id: &str,
     condition: &Condition,
 ) -> Result<Option<WorkItemView>> {
-    validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
     let selector = claim_selection::ClaimSelector::automation_condition(condition)?;
 
     let project_id = projects::project_id(store, project_name).await?;
@@ -199,7 +90,7 @@ pub async fn claim_specific_item(
     item_id: i64,
     agent_id: &str,
 ) -> Result<Option<WorkItemView>> {
-    validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
 
     let project_id = projects::project_id(store, project_name).await?;
     let txn = store
@@ -232,50 +123,6 @@ pub async fn claim_specific_item(
     .await
 }
 
-pub async fn release_item(
-    store: &Store,
-    project_name: &str,
-    item_id: i64,
-    agent_id: &str,
-    comment: Option<String>,
-    automation_disposition: ReleaseAutomationDisposition,
-) -> Result<WorkItemView> {
-    validate_agent_id(agent_id)?;
-    return_claim_to_source_state(
-        store,
-        project_name,
-        item_id,
-        agent_id,
-        ClaimReturnMode::Release {
-            comment: comment.as_deref(),
-            automation_disposition,
-        },
-    )
-    .await
-}
-
-pub async fn request_feedback(
-    store: &Store,
-    project_name: &str,
-    item_id: i64,
-    agent_id: &str,
-    body: &str,
-) -> Result<WorkItemView> {
-    validate_agent_id(agent_id)?;
-    if body.trim().is_empty() {
-        bail!("feedback request body cannot be empty");
-    }
-
-    return_claim_to_source_state(
-        store,
-        project_name,
-        item_id,
-        agent_id,
-        ClaimReturnMode::FeedbackRequest { body },
-    )
-    .await
-}
-
 pub async fn progress_item(
     store: &Store,
     project_name: &str,
@@ -283,7 +130,7 @@ pub async fn progress_item(
     agent_id: &str,
     body: &str,
 ) -> Result<CommentView> {
-    validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
     if body.trim().is_empty() {
         bail!("progress body cannot be empty");
     }
@@ -294,7 +141,7 @@ pub async fn progress_item(
         .begin()
         .await
         .context("failed to start item progress")?;
-    let claim = load_active_claim_in_tx(&txn, project_id, item_id, agent_id).await?;
+    let claim = active_claims::load_in_tx(&txn, project_id, item_id, agent_id).await?;
 
     let comment = record_agent_comment_in_tx(&txn, item_id, agent_id, body).await?;
 
@@ -320,7 +167,7 @@ pub async fn finish_item(
     agent_id: &str,
     report: &str,
 ) -> Result<WorkItemView> {
-    validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
     if report.trim().is_empty() {
         bail!("finish report cannot be empty");
     }
@@ -331,7 +178,7 @@ pub async fn finish_item(
         .begin()
         .await
         .context("failed to start item finish")?;
-    let claim = load_active_claim_in_tx(&txn, project_id, item_id, agent_id).await?;
+    let claim = active_claims::load_in_tx(&txn, project_id, item_id, agent_id).await?;
 
     let now = utc_now();
     record_agent_comment_in_tx(&txn, item_id, agent_id, report).await?;
@@ -397,7 +244,7 @@ pub async fn recover_stale_claims(
             agent_id: agent_id.clone(),
             claimed_at: item.claimed_at.clone(),
         };
-        release_item(
+        claim_returns::release_item(
             store,
             project_name,
             item.id,
@@ -405,73 +252,13 @@ pub async fn recover_stale_claims(
             Some(format!(
                 "Recovered stale claim after {stale_after_minutes} minute(s)."
             )),
-            ReleaseAutomationDisposition::Claimable,
+            claim_returns::ReleaseAutomationDisposition::Claimable,
         )
         .await?;
         recovered.push(claim);
     }
 
     Ok(recovered)
-}
-
-async fn return_claim_to_source_state(
-    store: &Store,
-    project_name: &str,
-    item_id: i64,
-    agent_id: &str,
-    mode: ClaimReturnMode<'_>,
-) -> Result<WorkItemView> {
-    let project_id = projects::project_id(store, project_name).await?;
-    let txn = store.db().begin().await.context(mode.start_context())?;
-    let claim = load_active_claim_in_tx(&txn, project_id, item_id, agent_id).await?;
-    let labels = work_item_labels::for_item(&txn, project_id, item_id).await?;
-    let release_state = workflow_labels::release_state_from_claim_labels(&labels);
-
-    let active = claim.clear_active_model(utc_now());
-    let updated = active.update(&txn).await.context(mode.update_context())?;
-
-    workflow_labels::apply_plan_in_tx(
-        &txn,
-        project_id,
-        item_id,
-        workflow_labels::claim_return_workflow_label_plan(&release_state, mode.label_disposition()),
-    )
-    .await?;
-
-    if let Some(comment) = mode
-        .agent_comment_body()
-        .filter(|body| !body.trim().is_empty())
-    {
-        record_agent_comment_in_tx(&txn, item_id, agent_id, comment).await?;
-    }
-
-    let event_body = mode.event_body(agent_id, &release_state);
-    work_item_events::record_event_in_tx(
-        &txn,
-        project_id,
-        Some(item_id),
-        mode.event_type(),
-        event_body.as_str(),
-    )
-    .await?;
-    txn.commit().await.context(mode.commit_context())?;
-    events::publish_work_item_changed(project_name, item_id);
-
-    work_items::model_to_view(store, updated).await
-}
-
-async fn load_active_claim_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-    agent_id: &str,
-) -> Result<ActiveClaim>
-where
-    C: ConnectionTrait,
-{
-    let item = work_items::get(conn, project_id, item_id).await?;
-    ensure_active_claim(&item, agent_id)?;
-    Ok(ActiveClaim { item })
 }
 
 async fn record_agent_comment_in_tx<C>(
@@ -627,21 +414,6 @@ where
     work_items::get(conn, project_id, item_id).await
 }
 
-fn validate_agent_id(agent_id: &str) -> Result<()> {
-    if agent_id.trim().is_empty() {
-        bail!("agent id cannot be empty");
-    }
-    Ok(())
-}
-
-fn ensure_active_claim(item: &WorkItemModel, agent_id: &str) -> Result<()> {
-    match item.claimed_by.as_deref() {
-        Some(claimed_by) if claimed_by == agent_id => Ok(()),
-        Some(claimed_by) => bail!("item {} is claimed by {claimed_by}", item.id),
-        None => bail!("item {} is not claimed", item.id),
-    }
-}
-
 fn timestamp_is_before_or_equal(value: &str, cutoff: OffsetDateTime) -> bool {
     OffsetDateTime::parse(value, &Rfc3339)
         .map(|timestamp| timestamp <= cutoff)
@@ -658,6 +430,7 @@ mod tests {
     use super::*;
     use crate::backend::{
         agent_ids,
+        claim_returns::{ReleaseAutomationDisposition, release_item, request_feedback},
         comments::list_comments,
         entities::{agent_run, work_item::WorkItemActiveModel},
         item_label_service::add_label,

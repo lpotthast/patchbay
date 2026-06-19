@@ -35,7 +35,7 @@ use crate::{
             read_run_token_usage, thread_event_output_piece, update_response_candidates,
             write_run_output_log,
         },
-        codex_app_server,
+        claim_returns, codex_app_server,
         entities::agent_run::{self, AgentRun, AgentRunActiveModel, AgentRunModel},
         events, item_claims, items, personalities,
         process_sessions::{ProcessSessionRegistry, ProcessSessionStart},
@@ -197,7 +197,7 @@ struct ClaimReleaseContext<'a> {
     agent_id: &'a str,
     reason: ClaimReleaseReason,
     detail: Option<&'a str>,
-    automation_disposition: item_claims::ReleaseAutomationDisposition,
+    automation_disposition: claim_returns::ReleaseAutomationDisposition,
 }
 
 #[derive(Debug)]
@@ -616,7 +616,7 @@ async fn complete_started_automation_run(
                     agent_id: &agent_id,
                     reason: ClaimReleaseReason::Failed,
                     detail: Some(&result_summary),
-                    automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
+                    automation_disposition: claim_returns::ReleaseAutomationDisposition::Claimable,
                 },
             )
             .await?;
@@ -885,9 +885,9 @@ async fn complete_started_automation_run(
                     },
                     detail: Some(&result_summary),
                     automation_disposition: if success {
-                        item_claims::ReleaseAutomationDisposition::Claimable
+                        claim_returns::ReleaseAutomationDisposition::Claimable
                     } else {
-                        item_claims::ReleaseAutomationDisposition::Blocked
+                        claim_returns::ReleaseAutomationDisposition::Blocked
                     },
                 },
             )
@@ -947,9 +947,9 @@ async fn complete_started_automation_run(
                     },
                     detail: Some(&message),
                     automation_disposition: if cancelled {
-                        item_claims::ReleaseAutomationDisposition::Claimable
+                        claim_returns::ReleaseAutomationDisposition::Claimable
                     } else {
-                        item_claims::ReleaseAutomationDisposition::Blocked
+                        claim_returns::ReleaseAutomationDisposition::Blocked
                     },
                 },
             )
@@ -1006,7 +1006,7 @@ async fn fail_run_after_claim(
             agent_id,
             reason: ClaimReleaseReason::Failed,
             detail: Some(&result_summary),
-            automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
+            automation_disposition: claim_returns::ReleaseAutomationDisposition::Claimable,
         },
     )
     .await?;
@@ -1030,7 +1030,7 @@ async fn cancel_run_after_claim(
             agent_id,
             reason: ClaimReleaseReason::Cancelled,
             detail: Some(&result_summary),
-            automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
+            automation_disposition: claim_returns::ReleaseAutomationDisposition::Claimable,
         },
     )
     .await?;
@@ -1064,7 +1064,7 @@ pub async fn stop_automation(store: &Store, project_name: &str) -> Result<Vec<Ag
                 agent_id: &agent_id,
                 reason: ClaimReleaseReason::Cancelled,
                 detail: Some(&result_summary),
-                automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
+                automation_disposition: claim_returns::ReleaseAutomationDisposition::Claimable,
             },
         )
         .await?;
@@ -1674,7 +1674,7 @@ async fn release_claim_if_needed(store: &Store, context: ClaimReleaseContext<'_>
         }
     };
     let comment = claim_release_comment(base, run_id, detail);
-    item_claims::release_item(
+    claim_returns::release_item(
         store,
         project_name,
         claimed_item.id,

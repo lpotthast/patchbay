@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::{
     app_state::AppState,
-    automation, comments,
+    automation, claim_returns, comments,
     comments::AddComment,
     item_claims, item_label_service, items,
     items::{CreateWorkItem, UpdateWorkItem},
@@ -232,13 +232,13 @@ pub(crate) async fn release_item(
     Json(request): Json<ReleaseWorkItemRequest>,
 ) -> Response {
     json_result(
-        item_claims::release_item(
+        claim_returns::release_item(
             &state.store,
             &project,
             item_id,
             &request.agent_id,
             request.comment,
-            item_claims::ReleaseAutomationDisposition::Blocked,
+            claim_returns::ReleaseAutomationDisposition::Blocked,
         )
         .await,
     )
@@ -250,7 +250,7 @@ pub(crate) async fn request_item_feedback(
     Json(request): Json<RequestFeedbackWorkItemRequest>,
 ) -> Response {
     json_result(
-        item_claims::request_feedback(
+        claim_returns::request_feedback(
             &state.store,
             &project,
             item_id,
