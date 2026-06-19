@@ -69,6 +69,7 @@ use serde::Deserialize;
 mod agent_tools;
 mod automation_triggers;
 mod projects;
+mod swim_lane_filter;
 mod swim_lanes;
 mod work_item_states;
 mod work_items;

@@ -333,6 +333,11 @@ impl BrowserTest<PatchbayTestApp> for PatchbayBoardTest {
         .await?;
         assert_source_contains(driver, "data-crudkit-leptos=\"work-item-states\"").await?;
         assert_source_contains(driver, "data-crudkit-leptos=\"swim-lanes\"").await?;
+        assert_swim_lane_create_form_exposes_structured_filter(driver).await?;
+        let structured_lane_id = create_swim_lane_filter_seed_lane(driver).await?;
+        edit_swim_lane_filter_through_structured_controls(driver, app, structured_lane_id).await?;
+        create_structured_lane_matching_item(driver).await?;
+        assert_structured_swim_lane_filter_board_behaviour(driver, app).await?;
 
         driver
             .goto(app.url("/runs?project=demo"))
@@ -554,6 +559,367 @@ async fn create_alternate_project(driver: &WebDriver) -> Result<(), Report> {
         .convert::<bool>()
         .context("failed to read alternate project setup response")?;
     assert_that!(created).is_true();
+    Ok(())
+}
+
+async fn assert_swim_lane_create_form_exposes_structured_filter(
+    driver: &WebDriver,
+) -> Result<(), Report> {
+    click(
+        driver,
+        By::Css("[data-crudkit-leptos='swim-lanes'] .crud-nav button"),
+    )
+    .await?;
+    find(
+        driver,
+        By::Css("[data-crudkit-leptos='swim-lanes'] [data-lane-filter-editor='structured']"),
+    )
+    .await?;
+    find(
+        driver,
+        By::Css("[data-crudkit-leptos='swim-lanes'] [data-lane-filter-add-clause='true']"),
+    )
+    .await?;
+    assert_source_does_not_contain(driver, "placeholder=\"{&quot;All&quot;").await?;
+    Ok(())
+}
+
+async fn create_swim_lane_filter_seed_lane(driver: &WebDriver) -> Result<i64, Report> {
+    let result = driver
+        .execute_async(
+            r#"
+            const done = arguments[0];
+            fetch('/api/swim_lanes/crud/create-one', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    entity: {
+                        project_id: 1,
+                        identifier: 'filtered',
+                        name: 'Filtered',
+                        position: 45,
+                        filter: '{"All":[]}',
+                        item_order: 'updated_desc',
+                        can_create_items: true
+                    }
+                }),
+            }).then(async response => {
+                if (!response.ok) {
+                    done(await response.text());
+                    return;
+                }
+                const saved = await response.json();
+                done(String(saved?.entity?.id ?? 'missing id'));
+            }).catch(error => done(String(error)));
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to create swim-lane through CrudKit browser-test setup request")?
+        .convert::<String>()
+        .context("failed to read swim-lane setup response")?;
+    Ok(result
+        .parse::<i64>()
+        .context_with(|| format!("failed to parse created swim-lane id from {result:?}"))?)
+}
+
+async fn edit_swim_lane_filter_through_structured_controls(
+    driver: &WebDriver,
+    app: &PatchbayTestApp,
+    lane_id: i64,
+) -> Result<(), Report> {
+    driver
+        .goto(app.url(&format!(
+            "/projects?project=demo&edit_swim_lane={lane_id}#swim-lanes"
+        )))
+        .await
+        .context("failed to open swim-lane edit form")?;
+    find(
+        driver,
+        By::Css("[data-crudkit-leptos='swim-lanes'] [data-lane-filter-editor='structured']"),
+    )
+    .await?;
+
+    let script = r#"
+        const done = arguments[0];
+        const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const waitFor = async (predicate, label) => {
+            const deadline = Date.now() + 5000;
+            while (Date.now() <= deadline) {
+                const value = predicate();
+                if (value) {
+                    return value;
+                }
+                await sleep(50);
+            }
+            throw new Error(`missing ${label}`);
+        };
+        const fire = (element, eventName) => {
+            element.dispatchEvent(new Event(eventName, { bubbles: true }));
+        };
+        const setInput = (element, value) => {
+            if (!element) {
+                throw new Error('missing input');
+            }
+            element.value = value;
+            element.setAttribute('value', value);
+            fire(element, 'input');
+            fire(element, 'change');
+        };
+        const setSelect = (element, value) => {
+            if (!element) {
+                throw new Error('missing select');
+            }
+            element.value = value;
+            fire(element, 'change');
+        };
+        const clickAndFrame = async (root, selector) => {
+            const button = root?.querySelector(selector);
+            if (!button) {
+                throw new Error(`missing button ${selector}`);
+            }
+            button.click();
+            await frame();
+            await frame();
+        };
+        const directClauses = (group) =>
+            Array.from(group.querySelectorAll(':scope > .lane-filter-elements > .lane-filter-clause'));
+
+        (async () => {
+            const panel = await waitFor(
+                () => document.querySelector("[data-crudkit-leptos='swim-lanes']"),
+                'swim-lanes panel',
+            );
+            const editor = await waitFor(
+                () => panel.querySelector("[data-lane-filter-editor='structured']"),
+                'filter editor',
+            );
+            const rootGroup = await waitFor(
+                () => editor.querySelector("[data-lane-filter-group='root']"),
+                'root filter group',
+            );
+
+            await clickAndFrame(rootGroup, "[data-lane-filter-add-clause='true']");
+            let rootClauses = directClauses(rootGroup);
+            setInput(rootClauses[0]?.querySelector("[data-lane-filter-key='true']"), 'state');
+            setInput(rootClauses[0]?.querySelector("[data-lane-filter-value='true']"), 'open');
+
+            await clickAndFrame(rootGroup, "[data-lane-filter-add-group='true']");
+            const nestedGroup = await waitFor(
+                () => editor.querySelector("[data-lane-filter-group='1']"),
+                'nested filter group',
+            );
+            setSelect(nestedGroup.querySelector('.lane-filter-group-kind select'), 'any');
+
+            await clickAndFrame(nestedGroup, "[data-lane-filter-add-clause='true']");
+            let nestedClauses = directClauses(nestedGroup);
+            setInput(nestedClauses[0]?.querySelector("[data-lane-filter-key='true']"), 'severity');
+            setSelect(nestedClauses[0]?.querySelector("[data-lane-filter-operator='true']"), 'is_in');
+            await frame();
+            nestedClauses = directClauses(nestedGroup);
+            setInput(
+                nestedClauses[0]?.querySelector("[data-lane-filter-value-list='true']"),
+                'critical, high',
+            );
+
+            await clickAndFrame(nestedGroup, "[data-lane-filter-add-clause='true']");
+            nestedClauses = directClauses(nestedGroup);
+            setInput(
+                nestedClauses[1]?.querySelector("[data-lane-filter-key='true']"),
+                'needs-verification',
+            );
+            setSelect(
+                nestedClauses[1]?.querySelector("[data-lane-filter-operator='true']"),
+                'present',
+            );
+            await frame();
+
+            const rawToggle = editor.querySelector('.lane-filter-raw-toggle');
+            rawToggle.click();
+            await frame();
+            const raw = editor.querySelector("[data-lane-filter-raw='true']")?.value ?? '';
+            if (!raw.includes('"Any"') || !raw.includes('"severity"') || !raw.includes('"is_in"')) {
+                done(`unexpected raw filter ${raw}`);
+                return;
+            }
+            editor.querySelector('.lane-filter-structured-toggle')?.click();
+            await frame();
+            done('ok');
+        })().catch(error => done(String(error)));
+        "#;
+    let result = driver
+        .execute_async(script, Vec::new())
+        .await
+        .context("failed to edit swim-lane filter through structured controls")?
+        .convert::<String>()
+        .context("failed to read structured swim-lane edit result")?;
+    assert_that!(result).is_equal_to("ok".to_owned());
+    click(
+        driver,
+        By::XPath(
+            "//div[@data-crudkit-leptos='swim-lanes']//button[normalize-space()='Speichern']",
+        ),
+    )
+    .await?;
+    wait_for_structured_swim_lane_filter_saved(driver, lane_id).await?;
+    Ok(())
+}
+
+async fn wait_for_structured_swim_lane_filter_saved(
+    driver: &WebDriver,
+    lane_id: i64,
+) -> Result<(), Report> {
+    let script = r#"
+        const done = arguments[0];
+        const laneId = LANE_ID;
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        (async () => {
+            const deadline = Date.now() + 5000;
+            let lastFilter = '<not read>';
+            while (Date.now() <= deadline) {
+                const response = await fetch('/api/swim_lanes/crud/read-many', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        limit: 1,
+                        skip: null,
+                        order_by: null,
+                        condition: {
+                            All: [{
+                                column_name: 'id',
+                                operator: '=',
+                                value: { I64: laneId }
+                            }]
+                        }
+                    }),
+                });
+                if (response.ok) {
+                    const rows = await response.json();
+                    const lane = Array.isArray(rows) ? rows[0] : undefined;
+                    const filter = lane?.filter ?? '';
+                    lastFilter = filter || JSON.stringify(rows);
+                    if (
+                        filter.includes('"Any"')
+                        && filter.includes('"state"')
+                        && filter.includes('"severity"')
+                        && filter.includes('"needs-verification"')
+                    ) {
+                        done('ok');
+                        return;
+                    }
+                }
+                await sleep(100);
+            }
+            done(`saved filter was not visible through CrudKit read-many; last=${lastFilter}`);
+        })().catch(error => done(String(error)));
+        "#
+    .replace("LANE_ID", &lane_id.to_string());
+    let result = driver
+        .execute_async(script, Vec::new())
+        .await
+        .context("failed to verify saved structured swim-lane filter")?
+        .convert::<String>()
+        .context("failed to read saved structured swim-lane filter result")?;
+    assert_that!(result).is_equal_to("ok".to_owned());
+    Ok(())
+}
+
+async fn create_structured_lane_matching_item(driver: &WebDriver) -> Result<(), Report> {
+    let created = driver
+        .execute_async(
+            r#"
+            const done = arguments[0];
+            fetch('/api/projects/demo/items', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: 'Structured lane item',
+                    description: 'Created for the structured swim-lane filter browser test',
+                    state: 'open',
+                    initial_labels: [{ key: 'severity', value: 'high' }],
+                    agent_model_override: null,
+                    agent_reasoning_effort_override: null
+                }),
+            }).then(async response => {
+                done(response.ok ? 'ok' : await response.text());
+            }).catch(error => done(String(error)));
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to create structured-lane matching item")?
+        .convert::<String>()
+        .context("failed to read structured-lane item setup response")?;
+    assert_that!(created).is_equal_to("ok".to_owned());
+    Ok(())
+}
+
+async fn assert_structured_swim_lane_filter_board_behaviour(
+    driver: &WebDriver,
+    app: &PatchbayTestApp,
+) -> Result<(), Report> {
+    driver
+        .goto(app.url("/?project=demo"))
+        .await
+        .context("failed to open board after structured swim-lane edit")?;
+    find(
+        driver,
+        By::XPath("//section[contains(@class, 'lane')]//h2[.='Filtered']"),
+    )
+    .await?;
+    let summary = driver
+        .execute(
+            r#"
+            const lane = Array.from(document.querySelectorAll('.lane'))
+                .find((lane) => lane.querySelector('.lane-header h2')?.textContent?.trim() === 'Filtered');
+            return [
+                `lane=${Boolean(lane)}`,
+                `item=${Boolean(lane?.textContent?.includes('Structured lane item'))}`,
+                `add=${Boolean(lane?.querySelector('.lane-add'))}`,
+            ].join(';');
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to inspect structured swim-lane board state")?
+        .convert::<String>()
+        .context("failed to read structured swim-lane board summary")?;
+    assert_that!(summary).is_equal_to("lane=true;item=true;add=true".to_owned());
+
+    let clicked = driver
+        .execute(
+            r#"
+            const lane = Array.from(document.querySelectorAll('.lane'))
+                .find((lane) => lane.querySelector('.lane-header h2')?.textContent?.trim() === 'Filtered');
+            lane?.querySelector('.lane-add')?.click();
+            return lane ? 'ok' : 'missing lane';
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to click structured swim-lane add button")?
+        .convert::<String>()
+        .context("failed to read structured swim-lane click result")?;
+    assert_that!(clicked).is_equal_to("ok".to_owned());
+    find(driver, By::Css("#new-item-modal select[name='state']")).await?;
+    let state = driver
+        .execute(
+            r#"
+            const select = document.querySelector('#new-item-modal select[name="state"]');
+            if (!select) {
+                throw new Error('missing new item state select');
+            }
+            return `${select.value}|${Array.from(select.options).map(option => option.value).join(',')}`;
+            "#,
+            Vec::new(),
+        )
+        .await
+        .context("failed to inspect structured swim-lane preselected state")?
+        .convert::<String>()
+        .context("failed to read structured swim-lane preselected state")?;
+    assert_that!(state).is_equal_to("open|open".to_owned());
+    close_clean_new_item_modal(driver).await?;
     Ok(())
 }
 

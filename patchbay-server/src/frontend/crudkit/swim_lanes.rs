@@ -1,3 +1,4 @@
+use super::swim_lane_filter::swim_lane_filter_field_renderer;
 use super::*;
 
 #[component]
@@ -211,9 +212,7 @@ fn swim_lanes_crudkit_config(
         create_field_renderer: FieldRendererRegistry::builder()
             .register(
                 CreateSwimLaneField::Filter,
-                multiline_text_field_renderer::<DynCreateField>(
-                    "{\"All\":[{\"column_name\":\"state\",\"operator\":\"=\",\"value\":{\"String\":\"open\"}}]}",
-                ),
+                swim_lane_filter_field_renderer::<DynCreateField>(),
             )
             .register(
                 CreateSwimLaneField::ItemOrder,
@@ -223,9 +222,7 @@ fn swim_lanes_crudkit_config(
         update_field_renderer: FieldRendererRegistry::builder()
             .register(
                 SwimLaneField::Filter,
-                multiline_text_field_renderer::<DynUpdateField>(
-                    "{\"All\":[{\"column_name\":\"state\",\"operator\":\"=\",\"value\":{\"String\":\"open\"}}]}",
-                ),
+                swim_lane_filter_field_renderer::<DynUpdateField>(),
             )
             .register(
                 SwimLaneField::ItemOrder,

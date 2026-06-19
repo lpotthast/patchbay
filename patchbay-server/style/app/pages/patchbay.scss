@@ -2508,6 +2508,115 @@ dd {
   }
 }
 
+.swim-lane-filter-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.lane-filter-structured,
+.lane-filter-raw-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.lane-filter-group {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  background: $surface-raised;
+  border: 1px solid $border;
+  border-radius: 8px;
+}
+
+.lane-filter-group .lane-filter-group {
+  background: $surface;
+}
+
+.lane-filter-group-header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lane-filter-group-kind {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 650;
+
+  select {
+    min-width: 88px;
+  }
+}
+
+.lane-filter-actions,
+.lane-filter-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.lane-filter-add-clause,
+.lane-filter-add-group {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+
+  svg {
+    width: 15px;
+    height: 15px;
+  }
+}
+
+.lane-filter-elements {
+  display: grid;
+  gap: 8px;
+}
+
+.lane-filter-clause {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(170px, 0.8fr) minmax(150px, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+.lane-filter-no-value,
+.lane-filter-empty {
+  color: $muted;
+}
+
+.lane-filter-empty {
+  margin: 0;
+}
+
+.lane-filter-error {
+  margin: 0;
+  padding: 8px 10px;
+  color: $danger;
+  background: $danger-soft;
+  border: 1px solid rgba($danger, 0.2);
+  border-radius: 8px;
+}
+
+.lane-filter-raw {
+  min-height: 130px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.lane-filter-remove-group,
+.lane-filter-remove-clause {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+
+  svg {
+    width: 15px;
+    height: 15px;
+  }
+}
+
 @media (max-width: 980px) {
   .app-topbar {
     grid-template-columns: 1fr;

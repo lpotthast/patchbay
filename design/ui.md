@@ -58,7 +58,7 @@ CrudKit is appropriate for ordinary resource administration:
 
 Patchbay-specific actions such as claim, release, finish, request feedback, automation launch, stale-claim recovery, and run-log viewing should remain custom UI flows. These actions carry workflow semantics that generic CRUD controls should not duplicate.
 
-Work item state and swim-lane authoring live on project administration surfaces, not the main board. The board shows small lane edit controls that navigate to the selected swim-lane editor. New item state choices come from authored work item states. Lane add controls may preselect a state when a lane filter is state-backed.
+Work item state and swim-lane authoring live on project administration surfaces, not the main board. The board shows small lane edit controls that navigate to the selected swim-lane editor. New item state choices come from authored work item states. Lane add controls may preselect a state when a lane filter is state-backed. Swim-lane filter create and edit forms expose structured label-condition controls for nested `All`/`Any` groups, label presence, flag labels, string equality, string inequality, and string-list membership while continuing to store the existing CrudKit `Condition` JSON string; invalid or unsupported existing filters remain editable through a raw JSON escape hatch.
 On item detail pages, the `state` label's value editor should render as a state picker backed by the current project's authored work item states instead of a free-text value field.
 
 The Codex app-server status panel should guide setup failures directly. When
