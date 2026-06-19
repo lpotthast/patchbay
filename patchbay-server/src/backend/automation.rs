@@ -30,7 +30,7 @@ use crate::{
     backend::{
         agent_ids, agent_tools, codex_app_server,
         entities::agent_run::{self, AgentRun, AgentRunActiveModel, AgentRunModel},
-        events, items,
+        events, item_claims, items,
         process_sessions::{ProcessSessionRegistry, ProcessSessionStart},
         projects,
         storage::{Store, utc_now},
@@ -223,7 +223,7 @@ struct ClaimReleaseContext<'a> {
     agent_id: &'a str,
     reason: ClaimReleaseReason,
     detail: Option<&'a str>,
-    automation_disposition: items::ReleaseAutomationDisposition,
+    automation_disposition: item_claims::ReleaseAutomationDisposition,
 }
 
 #[derive(Debug)]
@@ -532,7 +532,9 @@ async fn complete_started_automation_run(
 
     let claimed_item = {
         let claimed = if let Some(work_item_id) = start.work_item_id {
-            match items::claim_specific_item(store, &project_name, work_item_id, &agent_id).await {
+            match item_claims::claim_specific_item(store, &project_name, work_item_id, &agent_id)
+                .await
+            {
                 Ok(claimed) => claimed,
                 Err(err) => {
                     return fail_run(
@@ -544,8 +546,13 @@ async fn complete_started_automation_run(
                 }
             }
         } else if let Some(condition) = start.work_item_selector.as_ref() {
-            match items::claim_item_matching_condition(store, &project_name, &agent_id, condition)
-                .await
+            match item_claims::claim_item_matching_condition(
+                store,
+                &project_name,
+                &agent_id,
+                condition,
+            )
+            .await
             {
                 Ok(claimed) => claimed,
                 Err(err) => {
@@ -558,7 +565,9 @@ async fn complete_started_automation_run(
                 }
             }
         } else {
-            match items::claim_item(store, &project_name, &agent_id, DEFAULT_STATE_LABEL).await {
+            match item_claims::claim_item(store, &project_name, &agent_id, DEFAULT_STATE_LABEL)
+                .await
+            {
                 Ok(claimed) => claimed,
                 Err(err) => {
                     return fail_run(
@@ -633,7 +642,7 @@ async fn complete_started_automation_run(
                     agent_id: &agent_id,
                     reason: ClaimReleaseReason::Failed,
                     detail: Some(&result_summary),
-                    automation_disposition: items::ReleaseAutomationDisposition::Claimable,
+                    automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
                 },
             )
             .await?;
@@ -881,9 +890,9 @@ async fn complete_started_automation_run(
                     },
                     detail: Some(&result_summary),
                     automation_disposition: if success {
-                        items::ReleaseAutomationDisposition::Claimable
+                        item_claims::ReleaseAutomationDisposition::Claimable
                     } else {
-                        items::ReleaseAutomationDisposition::Blocked
+                        item_claims::ReleaseAutomationDisposition::Blocked
                     },
                 },
             )
@@ -943,9 +952,9 @@ async fn complete_started_automation_run(
                     },
                     detail: Some(&message),
                     automation_disposition: if cancelled {
-                        items::ReleaseAutomationDisposition::Claimable
+                        item_claims::ReleaseAutomationDisposition::Claimable
                     } else {
-                        items::ReleaseAutomationDisposition::Blocked
+                        item_claims::ReleaseAutomationDisposition::Blocked
                     },
                 },
             )
@@ -1002,7 +1011,7 @@ async fn fail_run_after_claim(
             agent_id,
             reason: ClaimReleaseReason::Failed,
             detail: Some(&result_summary),
-            automation_disposition: items::ReleaseAutomationDisposition::Claimable,
+            automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
         },
     )
     .await?;
@@ -1026,7 +1035,7 @@ async fn cancel_run_after_claim(
             agent_id,
             reason: ClaimReleaseReason::Cancelled,
             detail: Some(&result_summary),
-            automation_disposition: items::ReleaseAutomationDisposition::Claimable,
+            automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
         },
     )
     .await?;
@@ -1060,7 +1069,7 @@ pub async fn stop_automation(store: &Store, project_name: &str) -> Result<Vec<Ag
                 agent_id: &agent_id,
                 reason: ClaimReleaseReason::Cancelled,
                 detail: Some(&result_summary),
-                automation_disposition: items::ReleaseAutomationDisposition::Claimable,
+                automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
             },
         )
         .await?;
@@ -1280,7 +1289,7 @@ pub async fn recover_stale_claims_for_project(
                 .stale_claim_minutes
         }
     };
-    items::recover_stale_claims(store, project_name, minutes).await
+    item_claims::recover_stale_claims(store, project_name, minutes).await
 }
 
 pub async fn recover_configured_stale_claims(store: &Store) -> Result<Vec<RecoveredClaimView>> {
@@ -1290,8 +1299,12 @@ pub async fn recover_configured_stale_claims(store: &Store) -> Result<Vec<Recove
         let settings = projects::get_settings(store, &project.name).await?;
         if settings.stale_claim_minutes > 0 {
             recovered.extend(
-                items::recover_stale_claims(store, &project.name, settings.stale_claim_minutes)
-                    .await?,
+                item_claims::recover_stale_claims(
+                    store,
+                    &project.name,
+                    settings.stale_claim_minutes,
+                )
+                .await?,
             );
         }
     }
@@ -1666,7 +1679,7 @@ async fn release_claim_if_needed(store: &Store, context: ClaimReleaseContext<'_>
         }
     };
     let comment = claim_release_comment(base, run_id, detail);
-    items::release_item(
+    item_claims::release_item(
         store,
         project_name,
         claimed_item.id,
@@ -3695,7 +3708,8 @@ mod tests {
     use super::*;
     use crate::backend::{
         agent_ids,
-        items::{CreateWorkItem, claim_item, create_item, get_item},
+        item_claims::claim_item,
+        items::{CreateWorkItem, create_item, get_item},
         projects::{
             CreateProject, UpdateProjectSettings, create_project, get_project, get_settings,
             update_settings,

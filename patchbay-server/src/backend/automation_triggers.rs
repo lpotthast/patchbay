@@ -19,7 +19,7 @@ use crate::{
             },
             project, work_item_event,
         },
-        events, item_labels,
+        events, item_claims, item_labels,
         items::{self, CreateWorkItem},
         process_sessions::ProcessSessionRegistry,
         projects,
@@ -501,7 +501,8 @@ async fn run_next_work_item_automation_for_project(
             checked_without_match.push(trigger);
             continue;
         };
-        if items::has_claimable_item_matching_condition(store, project_name, selector).await? {
+        if item_claims::has_claimable_item_matching_condition(store, project_name, selector).await?
+        {
             candidates.push(WorkItemAutomationCandidate { trigger, view });
         } else {
             checked_without_match.push(trigger);
@@ -727,7 +728,7 @@ async fn trigger_has_consumable_work(
             && item.finished_at.is_none()
             && items::item_matches_condition(store, project_name, work_item_id, selector).await?);
     };
-    items::has_claimable_item_matching_condition(store, project_name, selector).await
+    item_claims::has_claimable_item_matching_condition(store, project_name, selector).await
 }
 
 async fn run_trigger_once(

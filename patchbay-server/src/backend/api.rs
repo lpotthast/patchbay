@@ -18,7 +18,7 @@ use crate::backend::{
     app_state::AppState,
     automation, comments,
     comments::AddComment,
-    item_label_service, items,
+    item_claims, item_label_service, items,
     items::{CreateWorkItem, UpdateWorkItem},
     projects, relationships,
 };
@@ -186,7 +186,7 @@ pub(crate) async fn claim_item(
     Json(request): Json<ClaimWorkItemRequest>,
 ) -> Response {
     json_result(
-        items::claim_item(&state.store, &project, &request.agent_id, &request.state)
+        item_claims::claim_item(&state.store, &project, &request.agent_id, &request.state)
             .await
             .map(|item| ClaimWorkItemResponse { item }),
     )
@@ -198,7 +198,7 @@ pub(crate) async fn progress_item(
     Json(request): Json<ProgressWorkItemRequest>,
 ) -> Response {
     json_result(
-        items::progress_item(
+        item_claims::progress_item(
             &state.store,
             &project,
             item_id,
@@ -215,7 +215,7 @@ pub(crate) async fn finish_item(
     Json(request): Json<FinishWorkItemRequest>,
 ) -> Response {
     json_result(
-        items::finish_item(
+        item_claims::finish_item(
             &state.store,
             &project,
             item_id,
@@ -232,13 +232,13 @@ pub(crate) async fn release_item(
     Json(request): Json<ReleaseWorkItemRequest>,
 ) -> Response {
     json_result(
-        items::release_item(
+        item_claims::release_item(
             &state.store,
             &project,
             item_id,
             &request.agent_id,
             request.comment,
-            items::ReleaseAutomationDisposition::Blocked,
+            item_claims::ReleaseAutomationDisposition::Blocked,
         )
         .await,
     )
@@ -250,7 +250,7 @@ pub(crate) async fn request_item_feedback(
     Json(request): Json<RequestFeedbackWorkItemRequest>,
 ) -> Response {
     json_result(
-        items::request_feedback(
+        item_claims::request_feedback(
             &state.store,
             &project,
             item_id,
