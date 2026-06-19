@@ -55,12 +55,6 @@ pub enum ReleaseAutomationDisposition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FinishedClaimPolicy {
-    AllowFinished,
-    RejectFinished,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaimReturnMode<'a> {
     Release {
         comment: Option<&'a str>,
@@ -228,14 +222,14 @@ pub async fn count_items_outside_work_item_states(
         .ok_or_else(|| report!("missing work items outside authored states count"))
 }
 
-pub async fn has_unclaimed_item_matching_condition(
+pub async fn has_claimable_item_matching_condition(
     store: &Store,
     project_name: &str,
     condition: &Condition,
 ) -> Result<bool> {
     let selector = item_labels::ValidatedLabelCondition::new(condition)?;
     let project_id = projects::project_id(store, project_name).await?;
-    let items = unclaimed_items_in_claim_order(store.db().as_ref(), project_id).await?;
+    let items = claimable_items_in_claim_order(store.db().as_ref(), project_id).await?;
     let labels_by_item =
         labels_for_candidate_items(store.db().as_ref(), project_id, &items).await?;
 
@@ -547,15 +541,7 @@ pub async fn claim_specific_item(
     }
     let labels = work_item_labels::for_item(&txn, project_id, item_id).await?;
     let source_state = item_labels::source_state_for_new_claim(&labels);
-    let claimed = claim_candidate_in_tx(
-        &txn,
-        project_id,
-        item_id,
-        agent_id,
-        &source_state,
-        FinishedClaimPolicy::RejectFinished,
-    )
-    .await?;
+    let claimed = claim_candidate_in_tx(&txn, project_id, item_id, agent_id, &source_state).await?;
 
     commit_claim_transaction(
         store,
@@ -963,18 +949,19 @@ where
     Ok(())
 }
 
-async fn unclaimed_items_in_claim_order<C>(conn: &C, project_id: i64) -> Result<Vec<WorkItemModel>>
+async fn claimable_items_in_claim_order<C>(conn: &C, project_id: i64) -> Result<Vec<WorkItemModel>>
 where
     C: ConnectionTrait,
 {
     Ok(WorkItem::find()
         .filter(work_item::Column::ProjectId.eq(project_id))
         .filter(work_item::Column::ClaimedBy.is_null())
+        .filter(work_item::Column::FinishedAt.is_null())
         .order_by_asc(work_item::Column::UpdatedAt)
         .order_by_asc(work_item::Column::Id)
         .all(conn)
         .await
-        .context("failed to list unclaimed work items")?)
+        .context("failed to list claimable work items")?)
 }
 
 async fn labels_for_candidate_items<C>(
@@ -1013,7 +1000,7 @@ where
     C: ConnectionTrait,
     F: FnMut(&[WorkItemLabelView]) -> bool,
 {
-    let candidates = unclaimed_items_in_claim_order(conn, project_id).await?;
+    let candidates = claimable_items_in_claim_order(conn, project_id).await?;
     let labels_by_item = labels_for_candidate_items(conn, project_id, &candidates).await?;
 
     for candidate in candidates {
@@ -1023,15 +1010,8 @@ where
         }
 
         let source_state = item_labels::source_state_for_new_claim(labels);
-        let claimed = claim_candidate_in_tx(
-            conn,
-            project_id,
-            candidate.id,
-            agent_id,
-            &source_state,
-            FinishedClaimPolicy::AllowFinished,
-        )
-        .await?;
+        let claimed =
+            claim_candidate_in_tx(conn, project_id, candidate.id, agent_id, &source_state).await?;
 
         if claimed.is_some() {
             return Ok(claimed);
@@ -1047,20 +1027,16 @@ async fn claim_candidate_in_tx<C>(
     item_id: i64,
     agent_id: &str,
     source_state: &str,
-    finished_policy: FinishedClaimPolicy,
 ) -> Result<Option<WorkItemModel>>
 where
     C: sea_orm::ConnectionTrait,
 {
     let now = utc_now();
-    let sql = match finished_policy {
-        FinishedClaimPolicy::RejectFinished => {
-            r#"
+    let sql = r#"
         UPDATE work_items
         SET claimed_by = ?3,
             claimed_at = ?4,
             claim_expires_at = NULL,
-            finished_at = NULL,
             version = version + 1,
             updated_at = ?4
         WHERE id = ?2
@@ -1068,24 +1044,7 @@ where
           AND claimed_by IS NULL
           AND finished_at IS NULL
         RETURNING id
-        "#
-        }
-        FinishedClaimPolicy::AllowFinished => {
-            r#"
-        UPDATE work_items
-        SET claimed_by = ?3,
-            claimed_at = ?4,
-            claim_expires_at = NULL,
-            finished_at = NULL,
-            version = version + 1,
-            updated_at = ?4
-        WHERE id = ?2
-          AND project_id = ?1
-          AND claimed_by IS NULL
-        RETURNING id
-        "#
-        }
-    };
+        "#;
 
     let claimed_id = conn
         .query_one(Statement::from_sql_and_values(
@@ -1987,7 +1946,7 @@ mod tests {
         ]);
 
         assert!(
-            has_unclaimed_item_matching_condition(&store, "demo", &selector)
+            has_claimable_item_matching_condition(&store, "demo", &selector)
                 .await
                 .unwrap()
         );
@@ -2054,7 +2013,7 @@ mod tests {
         ]);
 
         assert!(
-            !has_unclaimed_item_matching_condition(&store, "demo", &selector)
+            !has_claimable_item_matching_condition(&store, "demo", &selector)
                 .await
                 .unwrap()
         );
@@ -2836,6 +2795,63 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "item_finished")
         );
+    }
+
+    #[tokio::test]
+    async fn state_and_selector_claims_do_not_reopen_finished_items() {
+        let (_temp, store) = test_store().await;
+        let item = create_item(
+            &store,
+            "demo",
+            CreateWorkItem {
+                title: "Finished item".to_owned(),
+                description: "State changes alone should not reopen finished work".to_owned(),
+                state: "open".to_owned(),
+                agent_model_override: None,
+                agent_reasoning_effort_override: None,
+                initial_labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        claim_item(&store, "demo", "agent-a", "open")
+            .await
+            .unwrap()
+            .unwrap();
+        let finished = finish_item(&store, "demo", item.id, "agent-a", "Finished")
+            .await
+            .unwrap();
+        let moved = move_item(
+            &store,
+            "demo",
+            item.id,
+            "open".to_owned(),
+            Some(finished.version),
+        )
+        .await
+        .unwrap();
+        let selector = Condition::All(vec![ConditionElement::Clause(ConditionClause {
+            column_name: STATE_LABEL_KEY.to_owned(),
+            operator: Operator::Equal,
+            value: ConditionClauseValue::String("open".to_owned()),
+        })]);
+
+        let state_claim = claim_item(&store, "demo", "agent-b", "open").await.unwrap();
+        let selector_has_match = has_claimable_item_matching_condition(&store, "demo", &selector)
+            .await
+            .unwrap();
+        let selector_claim = claim_item_matching_condition(&store, "demo", "agent-c", &selector)
+            .await
+            .unwrap();
+        let reloaded = get_item(&store, "demo", item.id).await.unwrap();
+
+        assert_eq!(moved.state.as_deref(), Some("open"));
+        assert!(moved.finished_at.is_some());
+        assert!(state_claim.is_none());
+        assert!(!selector_has_match);
+        assert!(selector_claim.is_none());
+        assert_eq!(reloaded.claimed_by, None);
+        assert!(reloaded.finished_at.is_some());
     }
 
     #[tokio::test]

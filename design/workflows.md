@@ -14,6 +14,8 @@ Inputs include:
 
 The server chooses an unclaimed item from the requested state, skips items with `patchbay:automation-blocked` or `patchbay:feedback-requested`, records the source state in `patchbay:claimed-from-state`, marks the item `in_progress`, records claim ownership and timestamps, increments version, and emits workflow events. New claims capture the item's current `state` label as the release source and overwrite any stale `patchbay:claimed-from-state` label left on the item. Default automation requests the `open` state; user-defined automation selectors can target other labels but the blocked-label exclusion is implicit. `item claim` never defaults to `PATCHBAY_CLAIMED_ITEM_ID`.
 
+Claimable items must also be unfinished. Finished items are closed even if an operator later changes their `state` label to a value that matches a queue claim or automation selector.
+
 If no eligible item exists, the API reports that condition without creating implicit work.
 
 ## Progress
