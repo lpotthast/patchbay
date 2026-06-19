@@ -30,5 +30,6 @@ pub(crate) mod work_item_events;
 pub(crate) mod work_item_labels;
 pub(crate) mod work_item_relationships;
 pub(crate) mod work_item_states;
+pub(crate) mod work_item_updates;
 pub(crate) mod work_items;
 pub(crate) mod workspace;
