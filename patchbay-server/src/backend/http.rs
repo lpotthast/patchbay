@@ -1,21 +1,13 @@
-use std::{convert::Infallible, io, path::PathBuf, process::Output, time::Duration};
+use std::{io, path::PathBuf, process::Output};
 
-use async_stream::stream;
 use axum::{
     Extension, Form, Json, Router,
-    extract::{
-        Path, Query,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
+    extract::Path,
     http::{HeaderMap, StatusCode},
-    response::{
-        IntoResponse, Redirect, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
-    routing::{get, post},
+    response::{IntoResponse, Redirect, Response},
+    routing::post,
 };
 use crudkit_rs::impl_add_crud_routes;
-use futures_core::Stream;
 use leptos::prelude::LeptosOptions;
 use leptos_axum::{LeptosRoutes, generate_route_list};
 use rootcause::{Result, prelude::*};
@@ -32,14 +24,13 @@ use crate::{
         items::{self, CreateWorkItem, UpdateWorkItem},
         projects::{self, UpdateProjectSettings},
         relationships,
-        storage::Store,
         workspace::{self, WorkspaceOpenTarget},
     },
     frontend,
     shared::view_models::{
         AgentGitCommandPolicy, AgentGitHardResetPolicy, AgentReasoningEffort, AgentRunStatus,
         AgentToolName, AuthorType, AutomationActivation, AutomationEffect, DEFAULT_STATE_LABEL,
-        ProcessSessionView, RevertStrategy, WorkspaceMode, WorktreeCleanupPolicy,
+        RevertStrategy, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -212,99 +203,7 @@ pub(crate) fn router(
         )
         .route("/agent-tools/discover", post(discover_agent_tools))
         .route("/codex/logout", post(logout_codex))
-        .route("/api/projects/{project}", get(api::get_project))
-        .route(
-            "/api/projects/{project}/settings",
-            get(api::get_project_settings),
-        )
-        .route(
-            "/api/projects/{project}/memory",
-            get(api::get_project_memory).put(api::set_project_memory),
-        )
-        .route(
-            "/api/projects/{project}/memory/append",
-            post(api::append_project_memory),
-        )
-        .route(
-            "/api/projects/{project}/memory/events",
-            get(api::list_project_memory_events),
-        )
-        .route(
-            "/api/projects/{project}/memory/events/compact",
-            post(api::compact_project_memory_events),
-        )
-        .route(
-            "/api/projects/{project}/items",
-            get(api::list_items).post(api::create_item),
-        )
-        .route(
-            "/api/projects/{project}/labels",
-            get(api::list_project_labels),
-        )
-        .route("/api/projects/{project}/items/claim", post(api::claim_item))
-        .route(
-            "/api/projects/{project}/items/{item_id}",
-            get(api::get_item).patch(api::update_item),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/labels",
-            get(api::list_item_labels).post(api::add_item_label),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/labels/{label_id}",
-            axum::routing::patch(api::update_item_label).delete(api::delete_item_label),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/relationships",
-            get(api::list_item_relationships).post(api::create_item_relationship),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/relationships/{relationship_id}",
-            axum::routing::patch(api::update_item_relationship)
-                .delete(api::delete_item_relationship),
-        )
-        .route(
-            "/api/projects/{project}/relationships/{relationship_id}",
-            axum::routing::patch(api::update_relationship).delete(api::delete_relationship),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/progress",
-            post(api::progress_item),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/finish",
-            post(api::finish_item),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/release",
-            post(api::release_item),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/request-feedback",
-            post(api::request_item_feedback),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/comments",
-            get(api::list_comments).post(api::add_comment),
-        )
-        .route(
-            "/api/projects/{project}/automation/runs",
-            get(api::list_runs),
-        )
-        .route(
-            "/api/projects/{project}/automation/runs/{run_id}/log",
-            get(api::get_run_log),
-        )
-        .route("/api/projects/{project}/events", get(project_events))
-        .route(
-            "/api/projects/{project}/automation/sessions",
-            get(active_sessions),
-        )
-        .route(
-            "/api/projects/{project}/items/{item_id}/events",
-            get(item_events),
-        )
-        .route("/api/events/ws", get(ui_events_ws))
+        .merge(api::router::<LeptosOptions>())
         .merge(crud_router.with_state(()))
         .leptos_routes(&leptos_options, routes, leptos_shell)
         .fallback(leptos_axum::file_and_error_handler(frontend::shell))
@@ -1035,13 +934,6 @@ async fn cleanup_worktrees(
     }
 }
 
-async fn active_sessions(
-    Extension(state): Extension<AppState>,
-    Path(project): Path<String>,
-) -> Json<Vec<ProcessSessionView>> {
-    Json(state.sessions.list_for_project(&project).await)
-}
-
 #[derive(serde::Deserialize)]
 struct CreateAutomationTriggerForm {
     name: String,
@@ -1648,87 +1540,4 @@ async fn add_comment(
         Ok(_) => item_form_success(&headers, &project, item_id),
         Err(err) => form_error_response(&headers, err).await,
     }
-}
-
-#[derive(serde::Deserialize)]
-struct EventsQuery {
-    since: Option<i64>,
-}
-
-async fn project_events(
-    Extension(state): Extension<AppState>,
-    Path(project): Path<String>,
-    Query(query): Query<EventsQuery>,
-) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    event_stream(state.store.clone(), project, None, query.since)
-}
-
-async fn item_events(
-    Extension(state): Extension<AppState>,
-    Path((project, item_id)): Path<(String, i64)>,
-    Query(query): Query<EventsQuery>,
-) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    event_stream(state.store.clone(), project, Some(item_id), query.since)
-}
-
-async fn ui_events_ws(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(handle_ui_events_socket).into_response()
-}
-
-async fn handle_ui_events_socket(mut socket: WebSocket) {
-    let mut receiver = events::subscribe();
-    loop {
-        match receiver.recv().await {
-            Ok(event) => match serde_json::to_string(&event) {
-                Ok(body) => {
-                    if socket.send(Message::Text(body.into())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("failed to serialize UI event: {err}");
-                }
-            },
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        }
-    }
-}
-
-fn event_stream(
-    store: Store,
-    project: String,
-    item_id: Option<i64>,
-    since: Option<i64>,
-) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    let events = stream! {
-        let mut last_id = since;
-        loop {
-            match items::list_events(&store, &project, item_id, last_id).await {
-                Ok(new_events) => {
-                    for event in new_events {
-                        last_id = Some(event.id);
-                        let response = Event::default()
-                            .id(event.id.to_string())
-                            .event(event.event_type.clone())
-                            .json_data(&event)
-                            .unwrap_or_else(|err| {
-                                Event::default()
-                                    .event("error")
-                                    .data(format!("failed to serialize event: {err}"))
-                            });
-                        yield Ok(response);
-                    }
-                }
-                Err(err) => {
-                    yield Ok(Event::default().event("error").data(err.to_string()));
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    };
-
-    Sse::new(events).keep_alive(KeepAlive::default())
 }

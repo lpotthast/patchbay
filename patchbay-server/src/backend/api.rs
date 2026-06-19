@@ -1,9 +1,20 @@
+use std::{convert::Infallible, time::Duration};
+
+use async_stream::stream;
 use axum::{
-    Extension, Json,
-    extract::{Path, Query},
+    Extension, Json, Router,
+    extract::{
+        Path, Query,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
+    routing::{get, post},
 };
+use futures_core::Stream;
 use patchbay_types::{
     AddCommentRequest, ApiError, ClaimWorkItemRequest, ClaimWorkItemResponse,
     CreateWorkItemLabelRequest, CreateWorkItemRelationshipRequest, CreateWorkItemRequest,
@@ -14,59 +25,156 @@ use patchbay_types::{
 use rootcause::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{
-    app_state::AppState,
-    automation, comments,
-    comments::AddComment,
-    item_claims, item_label_service, items,
-    items::{CreateWorkItem, UpdateWorkItem},
-    projects, relationships,
+use crate::{
+    backend::{
+        app_state::AppState,
+        automation, comments,
+        comments::AddComment,
+        events, item_claims, item_label_service, items,
+        items::{CreateWorkItem, UpdateWorkItem},
+        projects, relationships,
+        storage::Store,
+    },
+    shared::view_models::ProcessSessionView,
 };
 
+pub(crate) fn router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/api/projects/{project}", get(get_project))
+        .route(
+            "/api/projects/{project}/settings",
+            get(get_project_settings),
+        )
+        .route(
+            "/api/projects/{project}/memory",
+            get(get_project_memory).put(set_project_memory),
+        )
+        .route(
+            "/api/projects/{project}/memory/append",
+            post(append_project_memory),
+        )
+        .route(
+            "/api/projects/{project}/memory/events",
+            get(list_project_memory_events),
+        )
+        .route(
+            "/api/projects/{project}/memory/events/compact",
+            post(compact_project_memory_events),
+        )
+        .route(
+            "/api/projects/{project}/items",
+            get(list_items).post(create_item),
+        )
+        .route("/api/projects/{project}/labels", get(list_project_labels))
+        .route("/api/projects/{project}/items/claim", post(claim_item))
+        .route(
+            "/api/projects/{project}/items/{item_id}",
+            get(get_item).patch(update_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/labels",
+            get(list_item_labels).post(add_item_label),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/labels/{label_id}",
+            axum::routing::patch(update_item_label).delete(delete_item_label),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/relationships",
+            get(list_item_relationships).post(create_item_relationship),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/relationships/{relationship_id}",
+            axum::routing::patch(update_item_relationship).delete(delete_item_relationship),
+        )
+        .route(
+            "/api/projects/{project}/relationships/{relationship_id}",
+            axum::routing::patch(update_relationship).delete(delete_relationship),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/progress",
+            post(progress_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/finish",
+            post(finish_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/release",
+            post(release_item),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/request-feedback",
+            post(request_item_feedback),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/comments",
+            get(list_comments).post(add_comment),
+        )
+        .route("/api/projects/{project}/automation/runs", get(list_runs))
+        .route(
+            "/api/projects/{project}/automation/runs/{run_id}/log",
+            get(get_run_log),
+        )
+        .route("/api/projects/{project}/events", get(project_events))
+        .route(
+            "/api/projects/{project}/automation/sessions",
+            get(active_sessions),
+        )
+        .route(
+            "/api/projects/{project}/items/{item_id}/events",
+            get(item_events),
+        )
+        .route("/api/events/ws", get(ui_events_ws))
+}
+
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListItemsQuery {
+struct ListItemsQuery {
     state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct LabelMutationQuery {
+struct LabelMutationQuery {
     expect_version: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListRunsQuery {
+struct ListRunsQuery {
     limit: Option<u64>,
 }
 
-pub(crate) async fn get_project(
+async fn get_project(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
 ) -> Response {
     json_result(projects::get_project(&state.store, &project).await)
 }
 
-pub(crate) async fn get_project_settings(
+async fn get_project_settings(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
 ) -> Response {
     json_result(projects::get_settings(&state.store, &project).await)
 }
 
-pub(crate) async fn get_project_memory(
+async fn get_project_memory(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
 ) -> Response {
     json_result(projects::get_memory(&state.store, &project).await)
 }
 
-pub(crate) async fn list_project_memory_events(
+async fn list_project_memory_events(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
 ) -> Response {
     json_result(projects::list_memory_events(&state.store, &project).await)
 }
 
-pub(crate) async fn set_project_memory(
+async fn set_project_memory(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
     Json(request): Json<UpdateProjectMemoryRequest>,
@@ -85,7 +193,7 @@ pub(crate) async fn set_project_memory(
     )
 }
 
-pub(crate) async fn append_project_memory(
+async fn append_project_memory(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
     Json(request): Json<UpdateProjectMemoryRequest>,
@@ -104,14 +212,14 @@ pub(crate) async fn append_project_memory(
     )
 }
 
-pub(crate) async fn compact_project_memory_events(
+async fn compact_project_memory_events(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
 ) -> Response {
     json_result(projects::compact_memory_events(&state.store, &project).await)
 }
 
-pub(crate) async fn list_items(
+async fn list_items(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
     Query(query): Query<ListItemsQuery>,
@@ -119,14 +227,14 @@ pub(crate) async fn list_items(
     json_result(items::list_items(&state.store, &project, query.state).await)
 }
 
-pub(crate) async fn list_project_labels(
+async fn list_project_labels(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
 ) -> Response {
     json_result(item_label_service::list_project_labels(&state.store, &project).await)
 }
 
-pub(crate) async fn create_item(
+async fn create_item(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
     Json(request): Json<CreateWorkItemRequest>,
@@ -150,14 +258,14 @@ pub(crate) async fn create_item(
     )
 }
 
-pub(crate) async fn get_item(
+async fn get_item(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
 ) -> Response {
     json_result(items::get_item(&state.store, &project, item_id).await)
 }
 
-pub(crate) async fn update_item(
+async fn update_item(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<UpdateWorkItemRequest>,
@@ -180,7 +288,7 @@ pub(crate) async fn update_item(
     )
 }
 
-pub(crate) async fn claim_item(
+async fn claim_item(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
     Json(request): Json<ClaimWorkItemRequest>,
@@ -192,7 +300,7 @@ pub(crate) async fn claim_item(
     )
 }
 
-pub(crate) async fn progress_item(
+async fn progress_item(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<ProgressWorkItemRequest>,
@@ -209,7 +317,7 @@ pub(crate) async fn progress_item(
     )
 }
 
-pub(crate) async fn finish_item(
+async fn finish_item(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<FinishWorkItemRequest>,
@@ -226,7 +334,7 @@ pub(crate) async fn finish_item(
     )
 }
 
-pub(crate) async fn release_item(
+async fn release_item(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<ReleaseWorkItemRequest>,
@@ -244,7 +352,7 @@ pub(crate) async fn release_item(
     )
 }
 
-pub(crate) async fn request_item_feedback(
+async fn request_item_feedback(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<RequestFeedbackWorkItemRequest>,
@@ -261,14 +369,14 @@ pub(crate) async fn request_item_feedback(
     )
 }
 
-pub(crate) async fn list_comments(
+async fn list_comments(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
 ) -> Response {
     json_result(comments::list_comments(&state.store, &project, item_id).await)
 }
 
-pub(crate) async fn add_comment(
+async fn add_comment(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<AddCommentRequest>,
@@ -288,7 +396,7 @@ pub(crate) async fn add_comment(
     )
 }
 
-pub(crate) async fn list_runs(
+async fn list_runs(
     Extension(state): Extension<AppState>,
     Path(project): Path<String>,
     Query(query): Query<ListRunsQuery>,
@@ -296,7 +404,7 @@ pub(crate) async fn list_runs(
     json_result(automation::list_runs(&state.store, &project, query.limit).await)
 }
 
-pub(crate) async fn get_run_log(
+async fn get_run_log(
     Extension(state): Extension<AppState>,
     Path((project, run_id)): Path<(String, i64)>,
 ) -> Response {
@@ -309,6 +417,96 @@ pub(crate) async fn get_run_log(
         )
         .await,
     )
+}
+
+async fn active_sessions(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+) -> Json<Vec<ProcessSessionView>> {
+    Json(state.sessions.list_for_project(&project).await)
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    since: Option<i64>,
+}
+
+async fn project_events(
+    Extension(state): Extension<AppState>,
+    Path(project): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    event_stream(state.store.clone(), project, None, query.since)
+}
+
+async fn item_events(
+    Extension(state): Extension<AppState>,
+    Path((project, item_id)): Path<(String, i64)>,
+    Query(query): Query<EventsQuery>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    event_stream(state.store.clone(), project, Some(item_id), query.since)
+}
+
+async fn ui_events_ws(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(handle_ui_events_socket).into_response()
+}
+
+async fn handle_ui_events_socket(mut socket: WebSocket) {
+    let mut receiver = events::subscribe();
+    loop {
+        match receiver.recv().await {
+            Ok(event) => match serde_json::to_string(&event) {
+                Ok(body) => {
+                    if socket.send(Message::Text(body.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("failed to serialize UI event: {err}");
+                }
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+fn event_stream(
+    store: Store,
+    project: String,
+    item_id: Option<i64>,
+    since: Option<i64>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let events = stream! {
+        let mut last_id = since;
+        loop {
+            match items::list_events(&store, &project, item_id, last_id).await {
+                Ok(new_events) => {
+                    for event in new_events {
+                        last_id = Some(event.id);
+                        let response = Event::default()
+                            .id(event.id.to_string())
+                            .event(event.event_type.clone())
+                            .json_data(&event)
+                            .unwrap_or_else(|err| {
+                                Event::default()
+                                    .event("error")
+                                    .data(format!("failed to serialize event: {err}"))
+                            });
+                        yield Ok(response);
+                    }
+                }
+                Err(err) => {
+                    yield Ok(Event::default().event("error").data(err.to_string()));
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+
+    Sse::new(events).keep_alive(KeepAlive::default())
 }
 
 fn json_result<T>(result: Result<T>) -> Response
@@ -327,14 +525,14 @@ where
     }
 }
 
-pub(crate) async fn list_item_labels(
+async fn list_item_labels(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
 ) -> Response {
     json_result(item_label_service::list_item_labels(&state.store, &project, item_id).await)
 }
 
-pub(crate) async fn add_item_label(
+async fn add_item_label(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Query(query): Query<LabelMutationQuery>,
@@ -353,7 +551,7 @@ pub(crate) async fn add_item_label(
     )
 }
 
-pub(crate) async fn update_item_label(
+async fn update_item_label(
     Extension(state): Extension<AppState>,
     Path((project, item_id, label_id)): Path<(String, i64, i64)>,
     Json(request): Json<UpdateWorkItemLabelRequest>,
@@ -372,7 +570,7 @@ pub(crate) async fn update_item_label(
     )
 }
 
-pub(crate) async fn delete_item_label(
+async fn delete_item_label(
     Extension(state): Extension<AppState>,
     Path((project, item_id, label_id)): Path<(String, i64, i64)>,
     Query(query): Query<LabelMutationQuery>,
@@ -389,14 +587,14 @@ pub(crate) async fn delete_item_label(
     )
 }
 
-pub(crate) async fn list_item_relationships(
+async fn list_item_relationships(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
 ) -> Response {
     json_result(relationships::list_item_relationships(&state.store, &project, item_id).await)
 }
 
-pub(crate) async fn create_item_relationship(
+async fn create_item_relationship(
     Extension(state): Extension<AppState>,
     Path((project, item_id)): Path<(String, i64)>,
     Json(request): Json<CreateWorkItemRelationshipRequest>,
@@ -413,7 +611,7 @@ pub(crate) async fn create_item_relationship(
     )
 }
 
-pub(crate) async fn update_relationship(
+async fn update_relationship(
     Extension(state): Extension<AppState>,
     Path((project, relationship_id)): Path<(String, i64)>,
     Json(request): Json<UpdateWorkItemRelationshipRequest>,
@@ -424,14 +622,14 @@ pub(crate) async fn update_relationship(
     )
 }
 
-pub(crate) async fn delete_relationship(
+async fn delete_relationship(
     Extension(state): Extension<AppState>,
     Path((project, relationship_id)): Path<(String, i64)>,
 ) -> Response {
     json_result(relationships::delete_relationship(&state.store, &project, relationship_id).await)
 }
 
-pub(crate) async fn update_item_relationship(
+async fn update_item_relationship(
     Extension(state): Extension<AppState>,
     Path((project, item_id, relationship_id)): Path<(String, i64, i64)>,
     Json(request): Json<UpdateWorkItemRelationshipRequest>,
@@ -448,7 +646,7 @@ pub(crate) async fn update_item_relationship(
     )
 }
 
-pub(crate) async fn delete_item_relationship(
+async fn delete_item_relationship(
     Extension(state): Extension<AppState>,
     Path((project, item_id, relationship_id)): Path<(String, i64, i64)>,
 ) -> Response {
