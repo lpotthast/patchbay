@@ -21,7 +21,7 @@ use crate::{
         },
         events, item_labels, personalities, projects,
         storage::{Store, utc_now},
-        swim_lanes, work_item_events, work_item_labels, work_item_states,
+        swim_lanes, work_item_events, work_item_labels, work_item_states, workflow_labels,
     },
     shared::view_models::{
         AgentReasoningEffort, AgentSandboxMode, AgentToolName, AutomationActivation,
@@ -839,7 +839,7 @@ fn validate_work_item_text(
 fn normalize_work_item_create_state(
     state: Option<String>,
 ) -> Result<String, HookError<WorkItemHookError>> {
-    item_labels::normalize_state_value(
+    workflow_labels::normalize_state_value(
         projects::normalize_optional(state).unwrap_or_else(|| DEFAULT_STATE_LABEL.to_owned()),
     )
     .map_err(|err| work_item_unprocessable_error(err.to_string()))

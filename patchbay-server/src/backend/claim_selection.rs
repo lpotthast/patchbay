@@ -7,7 +7,7 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder
 use crate::{
     backend::{
         entities::work_item::{self, WorkItem, WorkItemModel},
-        item_labels, label_conditions, work_item_labels, workflow_labels,
+        label_conditions, work_item_labels, workflow_labels,
     },
     shared::view_models::WorkItemLabelView,
 };
@@ -24,7 +24,7 @@ pub(crate) enum ClaimSelector {
 
 impl ClaimSelector {
     pub(crate) fn state(state: impl Into<String>) -> Result<Self> {
-        Ok(Self::State(item_labels::normalize_state_value(state)?))
+        Ok(Self::State(workflow_labels::normalize_state_value(state)?))
     }
 
     pub(crate) fn automation_condition(condition: &Condition) -> Result<Self> {
@@ -37,7 +37,7 @@ impl ClaimSelector {
         match self {
             Self::State(state) => {
                 !workflow_labels::is_automation_blocked(labels)
-                    && item_labels::current_state(labels).as_deref() == Some(state.as_str())
+                    && workflow_labels::current_state(labels).as_deref() == Some(state.as_str())
             }
             Self::AutomationCondition(selector) => selector.matches_automation_selector(labels),
         }

@@ -2,30 +2,12 @@ use std::collections::BTreeSet;
 
 use rootcause::{Result, prelude::*};
 
-use crate::shared::view_models::{STATE_LABEL_KEY, WorkItemLabelView};
+use crate::shared::view_models::STATE_LABEL_KEY;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NormalizedLabel {
     pub(crate) key: String,
     pub(crate) value: Option<String>,
-}
-
-pub(crate) fn current_state(labels: &[WorkItemLabelView]) -> Option<String> {
-    labels
-        .iter()
-        .find(|label| label.key == STATE_LABEL_KEY)
-        .and_then(|label| label.value.clone())
-}
-
-pub(crate) fn normalize_state_value(value: impl Into<String>) -> Result<String> {
-    let value = value.into().trim().to_owned();
-    if value.is_empty() {
-        bail!("state label value cannot be empty");
-    }
-    if value.contains('=') {
-        bail!("state label value cannot contain '='");
-    }
-    Ok(value)
 }
 
 pub(crate) fn normalize_key(value: impl Into<String>) -> Result<String> {
@@ -85,34 +67,10 @@ pub(crate) fn format_label(key: &str, value: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    fn label(key: &str, value: Option<&str>) -> WorkItemLabelView {
-        WorkItemLabelView {
-            id: 1,
-            project_id: 1,
-            work_item_id: 1,
-            key: key.to_owned(),
-            value: value.map(ToOwned::to_owned),
-            created_at: "2026-06-18T00:00:00Z".to_owned(),
-            updated_at: "2026-06-18T00:00:00Z".to_owned(),
-        }
-    }
-
-    #[test]
-    fn current_state_reads_state_label_value() {
-        let labels = vec![
-            label("priority", Some("high")),
-            label(STATE_LABEL_KEY, Some("review")),
-        ];
-
-        assert_eq!(current_state(&labels).as_deref(), Some("review"));
-        assert_eq!(current_state(&[]), None);
-    }
-
     #[test]
     fn normalization_rejects_empty_or_composite_keys() {
         assert_eq!(normalize_key(" priority ").unwrap(), "priority");
         assert!(normalize_key("severity=high").is_err());
-        assert!(normalize_state_value(" ").is_err());
         assert!(validate_pair(STATE_LABEL_KEY, None).is_err());
     }
 

@@ -15,7 +15,7 @@ use crate::{
         storage::{Store, utc_now},
         work_item_events, work_item_labels, work_item_relationships,
         work_item_updates::{self, WorkItemUpdatePlan},
-        work_items,
+        work_items, workflow_labels,
     },
     shared::view_models::{
         AgentReasoningEffort, CreateWorkItemLabelRequest, STATE_LABEL_KEY, WorkItemEventView,
@@ -43,7 +43,7 @@ pub async fn list_items(
     let project_id = projects::project_id(store, project_name).await?;
     let item_ids = match state {
         Some(state) => {
-            let state = item_labels::normalize_state_value(state)?;
+            let state = workflow_labels::normalize_state_value(state)?;
             let ids =
                 work_item_labels::item_ids_with_state(store.db().as_ref(), project_id, &state)
                     .await?;
@@ -130,7 +130,7 @@ pub async fn create_item(
     create: CreateWorkItem,
 ) -> Result<WorkItemView> {
     work_item_updates::validate_item_text(&create.title, &create.description)?;
-    let state_label = item_labels::normalize_state_value(create.state)?;
+    let state_label = workflow_labels::normalize_state_value(create.state)?;
     let agent_model_override = projects::normalize_optional(create.agent_model_override);
     let initial_labels = item_labels::normalize_initial_labels(
         create
@@ -165,12 +165,11 @@ pub async fn create_item(
         .insert(&txn)
         .await
         .context("failed to create work item")?;
-    work_item_labels::upsert_in_tx(
+    workflow_labels::apply_plan_in_tx(
         &txn,
         project_id,
         item.id,
-        STATE_LABEL_KEY,
-        Some(state_label.as_str()),
+        workflow_labels::state_workflow_label_plan(&state_label),
     )
     .await?;
     for label in &initial_labels {
@@ -231,15 +230,14 @@ pub async fn update_item(
         .await?;
     }
     if let Some(state) = applied.state {
-        work_item_labels::upsert_in_tx(
+        workflow_labels::apply_plan_in_tx(
             &txn,
             project_id,
             item_id,
-            STATE_LABEL_KEY,
-            Some(state.as_str()),
+            workflow_labels::state_workflow_label_plan(&state),
         )
         .await?;
-        let event_body = format!("Moved item to {state}");
+        let event_body = workflow_labels::state_move_event_body(&state);
         work_item_events::record_event_in_tx(
             &txn,
             project_id,

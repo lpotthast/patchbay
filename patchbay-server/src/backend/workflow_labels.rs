@@ -1,12 +1,12 @@
 use crate::{
-    backend::{item_labels, work_item_labels},
+    backend::work_item_labels,
     shared::view_models::{
         AUTOMATION_BLOCKED_LABEL_KEY, CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL,
         DEFAULT_STATE_LABEL, FEEDBACK_REQUESTED_LABEL_KEY, FINISHED_STATE_LABEL, STATE_LABEL_KEY,
         WorkItemLabelView,
     },
 };
-use rootcause::Result;
+use rootcause::{Result, prelude::*};
 use sea_orm::ConnectionTrait;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +38,25 @@ const CLAIMABLE_RELEASE_DELETES_WORKFLOW_LABELS: &[&str] = FINISH_DELETES_WORKFL
 const BLOCKED_RELEASE_DELETES_WORKFLOW_LABELS: &[&str] =
     &[CLAIMED_FROM_STATE_LABEL_KEY, FEEDBACK_REQUESTED_LABEL_KEY];
 const FEEDBACK_REQUEST_DELETES_WORKFLOW_LABELS: &[&str] = &[CLAIMED_FROM_STATE_LABEL_KEY];
+const NO_WORKFLOW_LABEL_DELETES: &[&str] = &[];
+
+pub(crate) fn current_state(labels: &[WorkItemLabelView]) -> Option<String> {
+    labels
+        .iter()
+        .find(|label| label.key == STATE_LABEL_KEY)
+        .and_then(|label| label.value.clone())
+}
+
+pub(crate) fn normalize_state_value(value: impl Into<String>) -> Result<String> {
+    let value = value.into().trim().to_owned();
+    if value.is_empty() {
+        bail!("state label value cannot be empty");
+    }
+    if value.contains('=') {
+        bail!("state label value cannot contain '='");
+    }
+    Ok(value)
+}
 
 pub(crate) fn is_automation_blocked(labels: &[WorkItemLabelView]) -> bool {
     labels.iter().any(|label| {
@@ -46,7 +65,7 @@ pub(crate) fn is_automation_blocked(labels: &[WorkItemLabelView]) -> bool {
 }
 
 pub(crate) fn source_state_for_new_claim(labels: &[WorkItemLabelView]) -> String {
-    item_labels::current_state(labels).unwrap_or_else(|| DEFAULT_STATE_LABEL.to_owned())
+    current_state(labels).unwrap_or_else(|| DEFAULT_STATE_LABEL.to_owned())
 }
 
 pub(crate) fn release_state_from_claim_labels(labels: &[WorkItemLabelView]) -> String {
@@ -54,8 +73,22 @@ pub(crate) fn release_state_from_claim_labels(labels: &[WorkItemLabelView]) -> S
         .iter()
         .find(|label| label.key == CLAIMED_FROM_STATE_LABEL_KEY)
         .and_then(|label| label.value.clone())
-        .or_else(|| item_labels::current_state(labels))
+        .or_else(|| current_state(labels))
         .unwrap_or_else(|| DEFAULT_STATE_LABEL.to_owned())
+}
+
+pub(crate) fn state_workflow_label_plan(state: &str) -> WorkflowLabelPlan<'_> {
+    WorkflowLabelPlan {
+        upserts: vec![WorkflowLabelUpsert {
+            key: STATE_LABEL_KEY,
+            value: Some(state),
+        }],
+        delete_keys: NO_WORKFLOW_LABEL_DELETES,
+    }
+}
+
+pub(crate) fn state_move_event_body(state: &str) -> String {
+    format!("Moved item to {state}")
 }
 
 pub(crate) fn new_claim_workflow_label_plan(source_state: &str) -> WorkflowLabelPlan<'_> {
@@ -158,6 +191,24 @@ mod tests {
     }
 
     #[test]
+    fn current_state_reads_state_label_value() {
+        let labels = vec![
+            label("priority", Some("high")),
+            label(STATE_LABEL_KEY, Some("review")),
+        ];
+
+        assert_eq!(current_state(&labels).as_deref(), Some("review"));
+        assert_eq!(current_state(&[]), None);
+    }
+
+    #[test]
+    fn state_normalization_rejects_empty_or_composite_values() {
+        assert_eq!(normalize_state_value(" review ").unwrap(), "review");
+        assert!(normalize_state_value(" ").is_err());
+        assert!(normalize_state_value("state=open").is_err());
+    }
+
+    #[test]
     fn automation_blocking_recognizes_release_and_feedback_labels() {
         assert!(is_automation_blocked(&[label(
             AUTOMATION_BLOCKED_LABEL_KEY,
@@ -185,6 +236,21 @@ mod tests {
         assert_eq!(release_state_from_claim_labels(&labels), "triage");
 
         assert_eq!(release_state_from_claim_labels(&[]), DEFAULT_STATE_LABEL);
+    }
+
+    #[test]
+    fn state_label_plan_updates_only_the_state_label() {
+        let plan = state_workflow_label_plan("review");
+
+        assert_eq!(
+            plan.upserts,
+            vec![WorkflowLabelUpsert {
+                key: STATE_LABEL_KEY,
+                value: Some("review"),
+            }]
+        );
+        assert!(plan.delete_keys.is_empty());
+        assert_eq!(state_move_event_body("review"), "Moved item to review");
     }
 
     #[test]

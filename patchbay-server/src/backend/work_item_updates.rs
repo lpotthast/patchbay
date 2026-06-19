@@ -4,8 +4,9 @@ use sea_orm::ActiveValue::Set;
 use crate::{
     backend::{
         entities::work_item::{WorkItemActiveModel, WorkItemModel},
-        item_labels, projects,
+        projects,
         storage::utc_now,
+        workflow_labels,
     },
     shared::view_models::AgentReasoningEffort,
 };
@@ -46,7 +47,7 @@ impl WorkItemUpdatePlan {
     pub(crate) fn new(update: UpdateWorkItem) -> Result<Self> {
         let state = update
             .state
-            .map(item_labels::normalize_state_value)
+            .map(workflow_labels::normalize_state_value)
             .transpose()
             .context("invalid item state")?;
         let field_updates = WorkItemFieldUpdates {

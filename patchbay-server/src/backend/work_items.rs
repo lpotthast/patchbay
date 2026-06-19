@@ -12,9 +12,9 @@ use crate::{
             agent_run::{self, AgentRun, AgentRunModel},
             work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
         },
-        item_labels, projects,
+        projects,
         storage::{Store, utc_now},
-        work_item_comments, work_item_labels,
+        work_item_comments, work_item_labels, workflow_labels,
     },
     shared::view_models::{
         AgentReasoningEffort, WorkItemClaimSourceView, WorkItemLabelView, WorkItemView,
@@ -157,7 +157,7 @@ fn to_view(
     comment_count: i64,
     claim_source: Option<WorkItemClaimSourceView>,
 ) -> Result<WorkItemView> {
-    let state = item_labels::current_state(&labels);
+    let state = workflow_labels::current_state(&labels);
 
     Ok(WorkItemView {
         id: item.id,
