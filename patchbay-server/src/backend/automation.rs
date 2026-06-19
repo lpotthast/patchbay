@@ -25,7 +25,8 @@ use crate::{
         agent_ids, agent_tools, automation_admission,
         automation_cli::patchbay_cli_path,
         automation_commit::{
-            CommitOutcomeEvaluation, capture_commit_baseline, evaluate_commit_outcome_for_run,
+            CommitBaseline, CommitOutcomeEvaluation, capture_commit_baseline,
+            evaluate_commit_outcome_for_run,
         },
         automation_output::{
             OutputPieceDraft, new_output_piece, push_codex_output_piece, read_run_output,
@@ -46,8 +47,8 @@ use crate::{
         AgentCommitOutcome, AgentReasoningEffort, AgentRunOutputKind, AgentRunOutputPiece,
         AgentRunStatus, AgentRunTokenUsageView, AgentRunView, AgentSandboxMode, AgentToolName,
         AutomationRunMutability, AutomationStatusView, DEFAULT_STATE_LABEL, FINISHED_STATE_LABEL,
-        ProjectMemoryEventRefView, ProjectSettingsView, RecoveredClaimView, RunLogView,
-        WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
+        ProjectMemoryEventRefView, ProjectSettingsView, ProjectView, RecoveredClaimView,
+        RunLogView, WorkItemView, WorkspaceMode, WorktreeCleanupPolicy,
     },
 };
 
@@ -88,6 +89,43 @@ struct LaunchDetails {
     agent_reasoning_effort: Option<AgentReasoningEffort>,
     commit_required: bool,
     pr_requested: bool,
+}
+
+struct PreparedAutomationLaunch {
+    run: AgentRunModel,
+    process_start: AgentProcessStart,
+    log_path: PathBuf,
+    commit_baseline: CommitBaseline,
+}
+
+struct LaunchPreparationInput<'a> {
+    store: &'a Store,
+    project_name: &'a str,
+    project: &'a ProjectView,
+    settings: &'a ProjectSettingsView,
+    start: &'a StartAutomation,
+    tool: AgentToolName,
+    run: AgentRunModel,
+    claimed_item: Option<&'a WorkItemView>,
+    agent_id: &'a str,
+    project_path: &'a Path,
+    codex_binary: PathBuf,
+    patchbay_binary: PathBuf,
+    run_mutability: AutomationRunMutability,
+}
+
+struct LaunchPreparationFailure {
+    run: Box<AgentRunModel>,
+    result_summary: String,
+}
+
+impl LaunchPreparationFailure {
+    fn new(run: AgentRunModel, result_summary: impl Into<String>) -> Self {
+        Self {
+            run: Box::new(run),
+            result_summary: result_summary.into(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -458,234 +496,45 @@ async fn complete_started_automation_run(
         .await;
     }
 
-    let workspace = match automation_workspace::prepare_workspace_for_run(
-        run.id,
-        &project_name,
-        &project_path,
-        settings.workspace_mode,
-        run_mutability,
-    ) {
-        Ok(workspace) => workspace,
-        Err(err) => {
-            let result_summary = format!("Failed to prepare workspace: {err}");
-            release_claim_if_needed(
-                store,
-                ClaimReleaseContext {
-                    project_name: &project_name,
-                    run_id: run.id,
-                    claimed_item: claimed_item.as_ref(),
-                    agent_id: &agent_id,
-                    reason: ClaimReleaseReason::Failed,
-                    detail: Some(&result_summary),
-                    automation_disposition: item_claims::ReleaseAutomationDisposition::Claimable,
-                },
-            )
-            .await?;
-            run = finish_run(store, run, AgentRunStatus::Failed, None, result_summary).await?;
-            return model_to_view(run);
-        }
-    };
-
-    let log_dir = automation_log_dir();
-    if let Err(err) = fs::create_dir_all(&log_dir)
-        .context_with(|| format!("failed to create automation log dir {}", log_dir.display()))
-    {
-        return fail_run_after_claim(
-            store,
-            &project_name,
-            run,
-            claimed_item.as_ref(),
-            &agent_id,
-            format!("Failed to create automation log directory: {err:#}"),
-        )
-        .await;
-    }
-    let prompt_path = log_dir.join(format!("run-{}.prompt.md", run.id));
-    let log_path = log_dir.join(format!("run-{}.output.json", run.id));
-    let agent_model = effective_agent_model(&settings, claimed_item.as_ref());
-    let agent_reasoning_effort = effective_agent_reasoning_effort(&settings, claimed_item.as_ref());
-    let codex_home = match codex_app_server::ensure_project_codex_home(&settings) {
-        Ok(codex_home) => codex_home,
-        Err(err) => {
-            return fail_run_after_claim(
-                store,
-                &project_name,
-                run,
-                claimed_item.as_ref(),
-                &agent_id,
-                format!("Failed to prepare project Codex home: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let real_git_path = match automation_runtime::resolve_real_git_path() {
-        Ok(real_git_path) => real_git_path,
-        Err(err) => {
-            return fail_run_after_claim(
-                store,
-                &project_name,
-                run,
-                claimed_item.as_ref(),
-                &agent_id,
-                format!("Failed to resolve git for automation: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let git_runtime = match automation_runtime::prepare_git_runtime(
-        run.id,
-        &log_dir,
-        &patchbay_binary,
-        &settings,
-        run_mutability,
-    ) {
-        Ok(git_runtime) => git_runtime,
-        Err(err) => {
-            return fail_run_after_claim(
-                store,
-                &project_name,
-                run,
-                claimed_item.as_ref(),
-                &agent_id,
-                format!("Failed to prepare git policy wrapper: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let memory_event_id = match projects::latest_memory_event_id(store, project.id).await {
-        Ok(memory_event_id) => memory_event_id,
-        Err(err) => {
-            return fail_run_after_claim(
-                store,
-                &project_name,
-                run,
-                claimed_item.as_ref(),
-                &agent_id,
-                format!("Failed to resolve project memory event: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let personality_description = match personalities::personality_description_for_prompt(
+    let launch = match prepare_automation_launch(LaunchPreparationInput {
         store,
-        project.id,
-        start.personality_id,
-    )
-    .await
-    {
-        Ok(personality_description) => personality_description,
-        Err(err) => {
-            return fail_run_after_claim(
-                store,
-                &project_name,
-                run,
-                claimed_item.as_ref(),
-                &agent_id,
-                format!("Failed to resolve automation personality: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let prompt_git_policy =
-        automation_runtime::git_runtime_policy_for_run(&settings, run_mutability);
-    let prompt = build_prompt(PromptContext {
         project_name: &project_name,
-        system_prompt: &project.system_prompt,
-        memory: &project.memory,
-        memory_event_id,
-        item: claimed_item.as_ref(),
-        agent_id: &agent_id,
-        personality_description: personality_description.as_deref(),
-        extra_prompt: start.extra_prompt.as_deref(),
-        mutability: run_mutability,
-        workspace_mode: settings.workspace_mode,
-        auto_commit: settings.auto_commit,
-        commit_standard: &settings.commit_standard,
-        revert_strategy: settings.revert_strategy,
-        create_pr: settings.create_pr,
-        git_command_policy: prompt_git_policy.policy,
-        git_policy_workspace_mode: prompt_git_policy.workspace_mode,
-    });
-    if let Err(err) = fs::write(&prompt_path, prompt)
-        .context_with(|| format!("failed to write prompt {}", prompt_path.display()))
-    {
-        return fail_run_after_claim(
-            store,
-            &project_name,
-            run,
-            claimed_item.as_ref(),
-            &agent_id,
-            format!("Failed to write automation prompt: {err:#}"),
-        )
-        .await;
-    }
-
-    let command = format!(
-        "{} app-server turn {}",
-        codex_binary.display(),
-        prompt_path.display()
-    );
-    let run_before_launch_update = run.clone();
-    run = match update_run_launch_details(
-        store,
+        project: &project,
+        settings: &settings,
+        start: &start,
+        tool,
         run,
-        LaunchDetails {
-            work_item_id: claimed_item.as_ref().map(|item| item.id),
-            command,
-            workspace,
-            prompt_path: Some(prompt_path.to_string_lossy().into_owned()),
-            log_path: Some(log_path.to_string_lossy().into_owned()),
-            memory_event_id,
-            agent_model: agent_model.clone(),
-            agent_reasoning_effort,
-            commit_required: commit_required_for_run(&settings, run_mutability),
-            pr_requested: pr_requested_for_run(&settings, run_mutability),
-        },
-    )
+        claimed_item: claimed_item.as_ref(),
+        agent_id: &agent_id,
+        project_path: &project_path,
+        codex_binary,
+        patchbay_binary,
+        run_mutability,
+    })
     .await
     {
-        Ok(run) => run,
-        Err(err) => {
+        Ok(launch) => launch,
+        Err(failure) => {
             return fail_run_after_claim(
                 store,
                 &project_name,
-                run_before_launch_update,
+                *failure.run,
                 claimed_item.as_ref(),
                 &agent_id,
-                format!("Failed to update automation launch details: {err:#}"),
+                failure.result_summary,
             )
             .await;
         }
     };
+    let PreparedAutomationLaunch {
+        run: prepared_run,
+        process_start,
+        log_path,
+        commit_baseline,
+    } = launch;
+    run = prepared_run;
 
-    let commit_baseline = capture_commit_baseline(
-        Path::new(&run.working_dir),
-        commit_required_for_run(&settings, run_mutability),
-    );
-    let output = run_agent_process(
-        AgentProcessStart {
-            run_id: run.id,
-            project_name: project_name.clone(),
-            tool_name: tool,
-            codex_binary,
-            codex_home,
-            patchbay_binary,
-            prompt_path,
-            working_dir: PathBuf::from(&run.working_dir),
-            git_runtime,
-            real_git_path,
-            agent_id: agent_id.clone(),
-            claimed_item_id: claimed_item.as_ref().map(|item| item.id),
-            agent_model,
-            agent_reasoning_effort,
-            agent_sandbox_mode: settings.agent_sandbox_mode,
-            agent_extra_writable_roots: settings.agent_extra_writable_roots.clone(),
-            mutability: run_mutability,
-        },
-        sessions,
-        cancellation,
-    )
-    .await;
+    let output = run_agent_process(process_start, sessions, cancellation).await;
     match output {
         Ok(output) => {
             run = update_run_process_id(store, run, output.process_id).await?;
@@ -832,6 +681,204 @@ async fn complete_started_automation_run(
             model_to_view(run)
         }
     }
+}
+
+async fn prepare_automation_launch(
+    input: LaunchPreparationInput<'_>,
+) -> std::result::Result<PreparedAutomationLaunch, LaunchPreparationFailure> {
+    let LaunchPreparationInput {
+        store,
+        project_name,
+        project,
+        settings,
+        start,
+        tool,
+        mut run,
+        claimed_item,
+        agent_id,
+        project_path,
+        codex_binary,
+        patchbay_binary,
+        run_mutability,
+    } = input;
+
+    let workspace = match automation_workspace::prepare_workspace_for_run(
+        run.id,
+        project_name,
+        project_path,
+        settings.workspace_mode,
+        run_mutability,
+    ) {
+        Ok(workspace) => workspace,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run,
+                format!("Failed to prepare workspace: {err}"),
+            ));
+        }
+    };
+
+    let log_dir = automation_log_dir();
+    if let Err(err) = fs::create_dir_all(&log_dir)
+        .context_with(|| format!("failed to create automation log dir {}", log_dir.display()))
+    {
+        return Err(LaunchPreparationFailure::new(
+            run,
+            format!("Failed to create automation log directory: {err:#}"),
+        ));
+    }
+    let prompt_path = log_dir.join(format!("run-{}.prompt.md", run.id));
+    let log_path = log_dir.join(format!("run-{}.output.json", run.id));
+    let agent_model = effective_agent_model(settings, claimed_item);
+    let agent_reasoning_effort = effective_agent_reasoning_effort(settings, claimed_item);
+    let codex_home = match codex_app_server::ensure_project_codex_home(settings) {
+        Ok(codex_home) => codex_home,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run,
+                format!("Failed to prepare project Codex home: {err:#}"),
+            ));
+        }
+    };
+    let real_git_path = match automation_runtime::resolve_real_git_path() {
+        Ok(real_git_path) => real_git_path,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run,
+                format!("Failed to resolve git for automation: {err:#}"),
+            ));
+        }
+    };
+    let git_runtime = match automation_runtime::prepare_git_runtime(
+        run.id,
+        &log_dir,
+        &patchbay_binary,
+        settings,
+        run_mutability,
+    ) {
+        Ok(git_runtime) => git_runtime,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run,
+                format!("Failed to prepare git policy wrapper: {err:#}"),
+            ));
+        }
+    };
+    let memory_event_id = match projects::latest_memory_event_id(store, project.id).await {
+        Ok(memory_event_id) => memory_event_id,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run,
+                format!("Failed to resolve project memory event: {err:#}"),
+            ));
+        }
+    };
+    let personality_description = match personalities::personality_description_for_prompt(
+        store,
+        project.id,
+        start.personality_id,
+    )
+    .await
+    {
+        Ok(personality_description) => personality_description,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run,
+                format!("Failed to resolve automation personality: {err:#}"),
+            ));
+        }
+    };
+    let prompt_git_policy =
+        automation_runtime::git_runtime_policy_for_run(settings, run_mutability);
+    let prompt = build_prompt(PromptContext {
+        project_name,
+        system_prompt: &project.system_prompt,
+        memory: &project.memory,
+        memory_event_id,
+        item: claimed_item,
+        agent_id,
+        personality_description: personality_description.as_deref(),
+        extra_prompt: start.extra_prompt.as_deref(),
+        mutability: run_mutability,
+        workspace_mode: settings.workspace_mode,
+        auto_commit: settings.auto_commit,
+        commit_standard: &settings.commit_standard,
+        revert_strategy: settings.revert_strategy,
+        create_pr: settings.create_pr,
+        git_command_policy: prompt_git_policy.policy,
+        git_policy_workspace_mode: prompt_git_policy.workspace_mode,
+    });
+    if let Err(err) = fs::write(&prompt_path, prompt)
+        .context_with(|| format!("failed to write prompt {}", prompt_path.display()))
+    {
+        return Err(LaunchPreparationFailure::new(
+            run,
+            format!("Failed to write automation prompt: {err:#}"),
+        ));
+    }
+
+    let command = format!(
+        "{} app-server turn {}",
+        codex_binary.display(),
+        prompt_path.display()
+    );
+    let commit_required = commit_required_for_run(settings, run_mutability);
+    let pr_requested = pr_requested_for_run(settings, run_mutability);
+    let run_before_launch_update = run.clone();
+    run = match update_run_launch_details(
+        store,
+        run,
+        LaunchDetails {
+            work_item_id: claimed_item.map(|item| item.id),
+            command,
+            workspace,
+            prompt_path: Some(prompt_path.to_string_lossy().into_owned()),
+            log_path: Some(log_path.to_string_lossy().into_owned()),
+            memory_event_id,
+            agent_model: agent_model.clone(),
+            agent_reasoning_effort,
+            commit_required,
+            pr_requested,
+        },
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(err) => {
+            return Err(LaunchPreparationFailure::new(
+                run_before_launch_update,
+                format!("Failed to update automation launch details: {err:#}"),
+            ));
+        }
+    };
+
+    let commit_baseline = capture_commit_baseline(Path::new(&run.working_dir), commit_required);
+    let process_start = AgentProcessStart {
+        run_id: run.id,
+        project_name: project_name.to_owned(),
+        tool_name: tool,
+        codex_binary,
+        codex_home,
+        patchbay_binary,
+        prompt_path,
+        working_dir: PathBuf::from(&run.working_dir),
+        git_runtime,
+        real_git_path,
+        agent_id: agent_id.to_owned(),
+        claimed_item_id: claimed_item.map(|item| item.id),
+        agent_model,
+        agent_reasoning_effort,
+        agent_sandbox_mode: settings.agent_sandbox_mode,
+        agent_extra_writable_roots: settings.agent_extra_writable_roots.clone(),
+        mutability: run_mutability,
+    };
+
+    Ok(PreparedAutomationLaunch {
+        run,
+        process_start,
+        log_path,
+        commit_baseline,
+    })
 }
 
 async fn fail_run(
