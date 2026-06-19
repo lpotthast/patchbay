@@ -1,26 +1,23 @@
-use std::collections::BTreeMap;
-
 use crudkit_core::condition::Condition;
 use rootcause::{Result, prelude::*};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction,
-    EntityTrait, QueryFilter, QueryOrder, Statement, TransactionTrait,
+    EntityTrait, QueryFilter, Statement, TransactionTrait,
 };
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     backend::{
+        claim_selection,
         entities::{
             comment::CommentModel,
             work_item::{self, WorkItem, WorkItemActiveModel, WorkItemModel},
         },
-        events, item_labels, label_conditions, projects,
+        events, projects,
         storage::{Store, utc_now},
         work_item_comments, work_item_events, work_item_labels, work_items, workflow_labels,
     },
-    shared::view_models::{
-        AuthorType, CommentView, RecoveredClaimView, WorkItemLabelView, WorkItemView,
-    },
+    shared::view_models::{AuthorType, CommentView, RecoveredClaimView, WorkItemView},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,20 +134,9 @@ pub async fn has_claimable_item_matching_condition(
     project_name: &str,
     condition: &Condition,
 ) -> Result<bool> {
-    let selector = label_conditions::ValidatedLabelCondition::new(condition)?;
+    let selector = claim_selection::ClaimSelector::automation_condition(condition)?;
     let project_id = projects::project_id(store, project_name).await?;
-    let items = claimable_items_in_claim_order(store.db().as_ref(), project_id).await?;
-    let labels_by_item =
-        labels_for_candidate_items(store.db().as_ref(), project_id, &items).await?;
-
-    for item in items {
-        let labels = labels_for_item(&labels_by_item, item.id);
-        if selector.matches_automation_selector(labels) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    claim_selection::has_matching_candidate(store.db().as_ref(), project_id, &selector).await
 }
 
 pub async fn claim_item(
@@ -160,7 +146,7 @@ pub async fn claim_item(
     state_filter: &str,
 ) -> Result<Option<WorkItemView>> {
     validate_agent_id(agent_id)?;
-    let state_filter = item_labels::normalize_state_value(state_filter)?;
+    let selector = claim_selection::ClaimSelector::state(state_filter)?;
 
     let project_id = projects::project_id(store, project_name).await?;
     let txn = store
@@ -168,11 +154,7 @@ pub async fn claim_item(
         .begin()
         .await
         .context("failed to start item claim")?;
-    let item = claim_first_matching_candidate_in_tx(&txn, project_id, agent_id, |labels| {
-        !workflow_labels::is_automation_blocked(labels)
-            && item_labels::current_state(labels).as_deref() == Some(state_filter.as_str())
-    })
-    .await?;
+    let item = claim_first_matching_candidate_in_tx(&txn, project_id, agent_id, &selector).await?;
 
     commit_claim_transaction(
         store,
@@ -191,7 +173,7 @@ pub async fn claim_item_matching_condition(
     condition: &Condition,
 ) -> Result<Option<WorkItemView>> {
     validate_agent_id(agent_id)?;
-    let selector = label_conditions::ValidatedLabelCondition::new(condition)?;
+    let selector = claim_selection::ClaimSelector::automation_condition(condition)?;
 
     let project_id = projects::project_id(store, project_name).await?;
     let txn = store
@@ -199,10 +181,7 @@ pub async fn claim_item_matching_condition(
         .begin()
         .await
         .context("failed to start item claim")?;
-    let item = claim_first_matching_candidate_in_tx(&txn, project_id, agent_id, |labels| {
-        selector.matches_automation_selector(labels)
-    })
-    .await?;
+    let item = claim_first_matching_candidate_in_tx(&txn, project_id, agent_id, &selector).await?;
 
     commit_claim_transaction(
         store,
@@ -363,7 +342,7 @@ pub async fn finish_item(
         .update(&txn)
         .await
         .context("failed to finish work item")?;
-    apply_workflow_label_plan_in_tx(
+    workflow_labels::apply_plan_in_tx(
         &txn,
         project_id,
         item_id,
@@ -451,7 +430,7 @@ async fn return_claim_to_source_state(
     let active = claim.clear_active_model(utc_now());
     let updated = active.update(&txn).await.context(mode.update_context())?;
 
-    apply_workflow_label_plan_in_tx(
+    workflow_labels::apply_plan_in_tx(
         &txn,
         project_id,
         item_id,
@@ -514,87 +493,26 @@ where
     .await
 }
 
-async fn apply_workflow_label_plan_in_tx<C>(
-    conn: &C,
-    project_id: i64,
-    item_id: i64,
-    plan: workflow_labels::WorkflowLabelPlan<'_>,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    for label_key in plan.delete_keys {
-        work_item_labels::delete_by_key_in_tx(conn, project_id, item_id, label_key).await?;
-    }
-    for upsert in plan.upserts {
-        work_item_labels::upsert_in_tx(conn, project_id, item_id, upsert.key, upsert.value).await?;
-    }
-    Ok(())
-}
-
-async fn claimable_items_in_claim_order<C>(conn: &C, project_id: i64) -> Result<Vec<WorkItemModel>>
-where
-    C: ConnectionTrait,
-{
-    Ok(WorkItem::find()
-        .filter(work_item::Column::ProjectId.eq(project_id))
-        .filter(work_item::Column::ClaimedBy.is_null())
-        .filter(work_item::Column::FinishedAt.is_null())
-        .order_by_asc(work_item::Column::UpdatedAt)
-        .order_by_asc(work_item::Column::Id)
-        .all(conn)
-        .await
-        .context("failed to list claimable work items")?)
-}
-
-async fn labels_for_candidate_items<C>(
-    conn: &C,
-    project_id: i64,
-    items: &[WorkItemModel],
-) -> Result<BTreeMap<i64, Vec<WorkItemLabelView>>>
-where
-    C: ConnectionTrait,
-{
-    if items.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
-    work_item_labels::for_items(conn, project_id, &item_ids).await
-}
-
-fn labels_for_item(
-    labels_by_item: &BTreeMap<i64, Vec<WorkItemLabelView>>,
-    item_id: i64,
-) -> &[WorkItemLabelView] {
-    labels_by_item
-        .get(&item_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-}
-
-async fn claim_first_matching_candidate_in_tx<C, F>(
+async fn claim_first_matching_candidate_in_tx<C>(
     conn: &C,
     project_id: i64,
     agent_id: &str,
-    mut matches_candidate: F,
+    selector: &claim_selection::ClaimSelector,
 ) -> Result<Option<WorkItemModel>>
 where
     C: ConnectionTrait,
-    F: FnMut(&[WorkItemLabelView]) -> bool,
 {
-    let candidates = claimable_items_in_claim_order(conn, project_id).await?;
-    let labels_by_item = labels_for_candidate_items(conn, project_id, &candidates).await?;
-
+    let candidates =
+        claim_selection::matching_candidates_in_claim_order(conn, project_id, selector).await?;
     for candidate in candidates {
-        let labels = labels_for_item(&labels_by_item, candidate.id);
-        if !matches_candidate(labels) {
-            continue;
-        }
-
-        let source_state = workflow_labels::source_state_for_new_claim(labels);
-        let claimed =
-            claim_candidate_in_tx(conn, project_id, candidate.id, agent_id, &source_state).await?;
+        let claimed = claim_candidate_in_tx(
+            conn,
+            project_id,
+            candidate.item_id,
+            agent_id,
+            &candidate.source_state,
+        )
+        .await?;
 
         if claimed.is_some() {
             return Ok(claimed);
@@ -682,7 +600,7 @@ async fn record_claim_in_tx<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    apply_workflow_label_plan_in_tx(
+    workflow_labels::apply_plan_in_tx(
         conn,
         project_id,
         item_id,

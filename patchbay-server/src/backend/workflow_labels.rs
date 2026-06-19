@@ -1,11 +1,13 @@
 use crate::{
-    backend::item_labels,
+    backend::{item_labels, work_item_labels},
     shared::view_models::{
         AUTOMATION_BLOCKED_LABEL_KEY, CLAIMED_FROM_STATE_LABEL_KEY, CLAIMED_STATE_LABEL,
         DEFAULT_STATE_LABEL, FEEDBACK_REQUESTED_LABEL_KEY, FINISHED_STATE_LABEL, STATE_LABEL_KEY,
         WorkItemLabelView,
     },
 };
+use rootcause::Result;
+use sea_orm::ConnectionTrait;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClaimReturnLabelDisposition {
@@ -119,6 +121,24 @@ pub(crate) fn claim_return_workflow_label_plan(
         upserts,
         delete_keys,
     }
+}
+
+pub(crate) async fn apply_plan_in_tx<C>(
+    conn: &C,
+    project_id: i64,
+    item_id: i64,
+    plan: WorkflowLabelPlan<'_>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    for label_key in plan.delete_keys {
+        work_item_labels::delete_by_key_in_tx(conn, project_id, item_id, label_key).await?;
+    }
+    for upsert in plan.upserts {
+        work_item_labels::upsert_in_tx(conn, project_id, item_id, upsert.key, upsert.value).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

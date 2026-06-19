@@ -6,6 +6,7 @@ pub(crate) mod automation;
 pub(crate) mod automation_commit;
 pub(crate) mod automation_controller;
 pub(crate) mod automation_triggers;
+pub(crate) mod claim_selection;
 pub(crate) mod codex_app_server;
 pub(crate) mod comments;
 pub(crate) mod crudkit_resources;
