@@ -3,12 +3,14 @@ use sea_orm::{ActiveModelTrait, TransactionTrait};
 
 use crate::{
     backend::{
-        active_claims, events, projects,
+        agent_ids, events, projects,
         storage::{Store, utc_now},
         work_item_comments, work_item_events, work_item_labels, work_items, workflow_labels,
     },
     shared::view_models::WorkItemView,
 };
+
+use super::active_claims;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReleaseAutomationDisposition {
@@ -102,7 +104,7 @@ pub(crate) async fn release_item(
     comment: Option<String>,
     automation_disposition: ReleaseAutomationDisposition,
 ) -> Result<WorkItemView> {
-    crate::backend::agent_ids::validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
     return_claim_to_source_state(
         store,
         project_name,
@@ -123,7 +125,7 @@ pub(crate) async fn request_feedback(
     agent_id: &str,
     body: &str,
 ) -> Result<WorkItemView> {
-    crate::backend::agent_ids::validate_agent_id(agent_id)?;
+    agent_ids::validate_agent_id(agent_id)?;
     if body.trim().is_empty() {
         bail!("feedback request body cannot be empty");
     }
